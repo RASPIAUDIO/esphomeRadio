@@ -25,14 +25,12 @@ api:
 
 ota:
 
-improv_serial:
-
 i2c:
   sda: GPIO18
   scl: GPIO11
 
 dashboard_import:
-  package_import_url: github://RASPIAUDIO/esphomeRadio@main
+  package_import_url: github://RASPIAUDIO/esphomeRadio/radio.yaml@main
 
 wifi:
   ap:

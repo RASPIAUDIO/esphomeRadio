@@ -45,6 +45,8 @@ void ES8388Component::setup() {
  
  //mono (L+R)/2
     this->write_byte(29, 0x20);
+ //Right DAC phase inversion
+    this->write_byte(28, 0x14);
  // ADC poweroff
    this->write_byte(3,0xFF);
    // ADC micboost 21 dB

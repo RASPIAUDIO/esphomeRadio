@@ -86,7 +86,7 @@ void ES8388Component::setup() {
   delay(1);
   this->write_byte(0x02, 0x00);
   // DAC power-up LOUT1/ROUT1 enabled
-  this->write_byte(0x04, 0x30);
+  this->write_byte(0x04, 0x3C);
   this->write_byte(0x03, 0x00);
   // DAC volume max
   this->write_byte(0x2E, 0x1C);

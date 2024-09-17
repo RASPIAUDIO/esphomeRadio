@@ -52,14 +52,10 @@ void ES8388Component::setup() {
    // ADC micboost 21 dB
    this->write_byte(9,0x77);   
 
-   // LINPUT1/RINPUT1  
-   this->write_byte(10,0x00);  
-/////////////////////////////////////    
-   // LINPUT2/RINPUT2  
- //  ES8388_Write_Reg(10,0x50);
-   // ADC mono left
- //  ES8388_Write_Reg(11,0x02); 
-/////////////////////////////////////   
+   // differential, stereo,  Right => LINPUT1/RINPUT1  , Left => LINPUT2/RINPUT2
+   this->write_byte(10,0xFC);  
+   this->write_byte(11,0x00);
+
    //i2S 16b
    this->write_byte(12,0x0C); 
    //MCLK 256

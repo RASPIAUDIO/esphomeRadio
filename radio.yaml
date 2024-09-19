@@ -146,6 +146,7 @@ binary_sensor:
       - timing:
           - ON FOR AT LEAST 350ms
         then:
+          - media_player.stop:
           - voice_assistant.start: 
       - timing:
           - ON FOR AT MOST 350ms

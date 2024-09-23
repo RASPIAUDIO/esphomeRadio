@@ -31,7 +31,7 @@ logger:
 
 api:
 
-ota:
+#ota:
 
 improv_serial:
 

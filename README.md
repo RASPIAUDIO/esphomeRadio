@@ -18,3 +18,6 @@ This project is for use with the **RASPIAUDIO Muse Radio**.
 ### Forum & Support
 For discussions and support, visit the forum:  
 [https://forum.raspiaudio.com/t/muse-radio-home-assistant/](https://forum.raspiaudio.com/t/muse-radio-home-assistant/)
+
+For a **step-by-step video guide** (made for the Luxe, but applicable for the Muse Radio), check out:  
+[https://youtu.be/QDDjXAWuk0E](https://youtu.be/QDDjXAWuk0E)

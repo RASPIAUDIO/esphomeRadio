@@ -8,7 +8,7 @@ namespace esphome {
 namespace es8388 {
 
 void ES8388Component::setup() {
-//  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
+//   PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
 //  WRITE_PERI_REG(PIN_CTRL, READ_PERI_REG(PIN_CTRL) & 0xFFFFFFF0);
   //reset
   this->write_byte(0, 0x80);

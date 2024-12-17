@@ -1,0 +1,457 @@
+substitutions:
+  name: raspiaudio-radio
+  friendly_name: Raspiaudio Radio
+  raspiaudio_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/casita/loading_320_240.png  
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2024.9.1
+  platformio_options:
+    board_build.flash_mode: dio
+    board_build.arduino.memory_type: qio_opi
+  on_boot:
+    priority: -100.0
+    then:
+      - output.turn_off: dac_mute
+      - light.turn_on:
+          id: screen_backlight
+          brightness: 100%
+
+
+external_components:
+  - source: github://RASPIAUDIO/esphomeRadio@main
+    components: [es8388]
+    refresh: 0s
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: arduino
+
+
+ota:
+  platform: esphome
+
+api:
+ services:
+    - service: start_va
+      then:
+        - voice_assistant.start
+    - service: stop_va
+      then:
+        - voice_assistant.stop
+
+wifi:
+    ap:
+     ssid: "Raspiaudio-radio"
+     password: "12345678"
+     
+captive_portal:     
+
+improv_serial:
+
+logger:
+
+##########
+# Hardware Configuration
+es8388:
+ 
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+#######
+# Buses Configuration
+
+i2c:
+  sda: GPIO18
+  scl: GPIO11
+  id: i2c_bus
+
+spi:
+  - id: spi_bus0
+    clk_pin: GPIO12
+    mosi_pin: GPIO8
+    # miso_pin: GPIOXX
+    interface: hardware
+
+i2s_audio:
+  - id: i2s_shared
+    i2s_lrclk_pin: GPIO16
+    i2s_bclk_pin: GPIO5
+    i2s_mclk_pin: GPIO0
+
+#####################
+# Internal Components
+
+output:
+  - platform: gpio
+    id: dac_mute
+    pin:
+      number: GPIO46
+      inverted: true
+      mode:
+        output: true
+      allow_other_uses: true
+
+  - platform: ledc
+    pin:
+      number: GPIO41
+      mode:
+        output: true
+    id: screen_backlight_pin
+
+light:
+  - platform: monochromatic
+    output: screen_backlight_pin
+    id: screen_backlight
+    name: Screen Backlight
+    restore_mode: ALWAYS_ON
+    
+       
+globals:
+  - id: lightTO
+    type: int
+    initial_value: '0'
+
+interval:
+  - interval: 1sec
+    then:
+      - if:
+          condition:  
+            and:
+              - light.is_on: screen_backlight
+              - lambda: 'return id(lightTO) < 60;'              
+          then:
+#            - logger.log: "La lumière screen_backlight est allumée."
+            - lambda: |-
+                id(lightTO)++;
+#                ESP_LOGD("lightTO", "Compteur: %d", id(lightTO));
+          else:
+#            - logger.log: "La lumière screen_backlight est éteinte."
+            - lambda: |-
+                id(lightTO) = 0;
+            - light.turn_off: screen_backlight               
+           
+    
+microphone:
+  - platform: i2s_audio
+    id: raspiaudio_microphone
+    i2s_din_pin: GPIO4
+    adc_type: external
+    pdm: false
+    
+image:
+  - file: "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/Raspiaudio.png"
+    id: raspiIm
+    resize: 240x320
+    type: RGB565
+  - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/WFWW.png" 
+    id: WFWWIm
+    resize: 240x320
+    type: GRAYSCALE
+  - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/W.png" 
+    id: WIm
+    resize: 240x320
+    type: GRAYSCALE
+        
+display:
+  - id: raspiaudio_display
+    platform: ili9xxx
+    model: ST7789V
+    cs_pin: GPIO40
+    dc_pin: GPIO39
+    reset_pin: GPIO9
+    invert_colors: false
+    rotation: 90   
+    update_interval: never
+    auto_clear_enabled: false
+
+# LVGL configuration to display "RASPIAUDIO" with alignment and rotation
+lvgl:
+  displays:
+    - raspiaudio_display
+  pages:
+    # Main Page
+    - id: starting_page
+      widgets:
+        - image:
+            align: CENTER
+            src: raspiIm
+            id: img_id    
+  
+    - id: listening_page
+      widgets:
+        - label:
+            align: CENTER
+            text: "LISTENING"
+            y: -30  # Position label higher to accommodate spinner
+        - spinner:
+            align: CENTER
+            y: 20  # Position spinner below the label
+            height: 50
+            width: 50
+            spin_time: 1000ms
+            arc_length: 60deg
+            arc_width: 8
+            indicator:
+              arc_color: 0x18bcf2
+              arc_width: 8
+
+    - id: answering_page
+      widgets:
+        - label:
+            align: CENTER
+            text: 'ANSWERING'
+
+    - id: waiting_page
+      widgets:
+        - image:
+            align: CENTER
+            src: WFWWIm
+    
+    - id: waitingB_page
+      widgets:
+        - image:
+            align: CENTER
+            src: WIm        
+
+
+###############
+# Home Assistant Components
+
+binary_sensor:
+  # Uncomment if using the function button
+  # - platform: gpio
+  #   pin:
+  #     number: GPIO35
+  #     mode:
+  #       input: true
+  #       pullup: true
+  #   id: function_button
+  #   name: Function Button
+  #   disabled_by_default: true
+
+  - platform: gpio
+    pin:
+      number: GPIO48
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    id: volume_button
+    name: Volume Button
+    disabled_by_default: true
+    on_click:
+      then:
+        - voice_assistant.start
+
+  - platform: gpio
+    pin:
+      number: GPIO10
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    id: jack_plugged
+    name: Jack Plugged In
+    disabled_by_default: true
+    filters:
+      - delayed_on_off: 0.3s
+    on_state:
+      then:
+        - script.execute: update_dac_mute
+
+  - platform: gpio
+    pin:
+      number: GPIO21
+      mode:
+        input: true
+        pullup: true
+    id: usb_plugged
+    name: USB Plugged In
+    disabled_by_default: true
+
+sensor:
+  - platform: rotary_encoder
+    name: "Volume"
+    id: volume_encoder
+    pin_a:
+      number: GPIO42
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO3
+      mode:
+        input: true
+        pullup: true
+    on_anticlockwise:
+      then:
+        - light.turn_on: screen_backlight      
+        - lambda: |-
+                id(lightTO) = 0;        
+        - media_player.volume_down: raspiaudio_speaker
+    on_clockwise:
+      then:
+        - media_player.volume_up: raspiaudio_speaker
+        - light.turn_on: screen_backlight
+        - lambda: |-
+                id(lightTO) = 0;        
+        
+  - platform: rotary_encoder
+    name: "Function"
+    id: function_encoder
+    pin_a:
+      number: GPIO7
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO6
+      mode:
+        input: true
+        pullup: true
+
+switch:
+  - platform: template
+    name: Use Wake Word
+    id: use_wake_word
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - lambda: id(va).set_use_wake_word(true);
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running
+          then:
+            - voice_assistant.start_continuous
+      - script.execute: reset_display
+    on_turn_off:
+      - voice_assistant.stop
+      - lambda: id(va).set_use_wake_word(false);
+      - script.execute: reset_display
+
+media_player:
+  - platform: i2s_audio
+    id: raspiaudio_speaker
+    name: None
+    dac_type: external
+    i2s_dout_pin: GPIO17
+    i2s_audio_id: i2s_shared
+    mode: mono
+    mute_pin:
+      number: GPIO46
+      inverted: true
+      mode:
+        output: true
+      allow_other_uses: true
+
+voice_assistant:
+  id: va
+  microphone: raspiaudio_microphone
+  media_player: raspiaudio_speaker
+  use_wake_word: true
+  on_listening:
+    - logger.log: "🔵Voice Assistant is now listening"
+    - light.turn_on:
+        id: screen_backlight
+        brightness: 100%
+        effect: none
+    - lvgl.page.show: listening_page
+
+  on_tts_start:
+    - logger.log: "🔵Voice Assistant is now streaming answer"
+    - light.turn_on:
+        id: screen_backlight
+        brightness: 100%
+        effect: none
+    - lvgl.page.show: answering_page
+
+  # Ici on va vérifier régulièrement si le media_player diffuse toujours du son
+  # et on attend qu'il termine pour revenir à la page 'waiting_page'
+  on_tts_end:
+    - logger.log: "🔵Waiting for media playback to finish"
+    - wait_until:
+        not:
+          media_player.is_playing: raspiaudio_speaker  # On attend que la lecture se termine    
+    - logger.log: "🔵TTS playback finished, switching to waiting page"
+    - script.execute: reset_display
+
+  on_client_connected:
+    - delay: 5sec
+    - if:
+        condition:
+          switch.is_on: use_wake_word
+        then:
+          - voice_assistant.start_continuous
+          - lvgl.page.show: waiting_page  
+        else:
+          - lvgl.page.show: waitingB_page  
+          
+  on_client_disconnected:
+    - if:
+        condition:
+          switch.is_on: use_wake_word
+        then:
+          - voice_assistant.stop
+
+  on_end:
+    - delay: 100ms
+    - wait_until:
+        not:
+          media_player.is_playing: raspiaudio_speaker          
+    - script.execute: reset_display
+
+
+  on_error:
+    - light.turn_on:
+        id: screen_backlight
+        brightness: 100%
+        effect: none
+    - delay: 1s
+    - script.execute: reset_display
+    - script.wait: reset_display
+    - lambda: |-
+        if (code == "wake-provider-missing" || code == "wake-engine-missing") {
+          id(use_wake_word).turn_off();
+        }
+
+
+#########
+# Scripts
+
+script:
+  - id: reset_display
+    then:
+    - light.turn_on: screen_backlight
+    - lambda: |-
+                id(lightTO) = 0;    
+    - if:
+        condition:
+            switch.is_on: use_wake_word
+        then:
+            - lvgl.page.show: waiting_page  # Réafficher la page waiting à la fin
+        else:
+            - lvgl.page.show: waitingB_page  # Réafficher la page waiting à la fin    
+    
+ 
+
+  - id: update_dac_mute
+    then:
+      - if:
+          condition:
+            and:
+              - media_player.is_playing
+              - binary_sensor.is_off: jack_plugged
+          then:
+            - logger.log: "Turning off DAC mute"
+            - output.turn_off: dac_mute
+          else:
+            - logger.log: "Turning on DAC mute"
+            - output.turn_on: dac_mute

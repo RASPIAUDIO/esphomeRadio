@@ -149,15 +149,12 @@ image:
   - file: "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/Raspiaudio.png"
     id: raspiIm
     resize: 240x320
-    type: RGB565
   - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/WFWW.png" 
     id: WFWWIm
     resize: 240x320
-    type: GRAYSCALE
   - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/W.png" 
     id: WIm
     resize: 240x320
-    type: GRAYSCALE
         
 display:
   - id: raspiaudio_display

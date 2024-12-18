@@ -146,10 +146,10 @@ microphone:
     pdm: false
     
 image:
-  - file: "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/Raspiaudio.c"
+  - file: "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/Raspiaudio.png"
     id: raspiIm
     resize: 240x320
-    type: RGB565
+    type: GRAYSCALE
   - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/WFWW.png" 
     id: WFWWIm
     resize: 240x320

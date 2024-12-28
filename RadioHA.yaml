@@ -17,6 +17,13 @@ esphome:
       - light.turn_on:
           id: screen_backlight
           brightness: 100%
+      - lambda: |-
+              id(lightTO) = 0;
+      - script.execute: logo
+      - script.wait: logo    
+      - delay: 5sec
+      - script.execute: reset_display
+      - script.wait: reset_display
 
 
 external_components:
@@ -49,9 +56,9 @@ wifi:
      ssid: "Raspiaudio-radio"
      password: "12345678"
      
-captive_portal:     
-
 improv_serial:
+     
+#captive_portal:     
 
 logger:
 
@@ -148,93 +155,69 @@ microphone:
 image:
   - file: "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/Raspiaudio.png"
     id: raspiIm
-    resize: 240x320
-    type: GRAYSCALE
+    resize: 320x240
+    type: RGB24
   - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/WFWW.png" 
     id: WFWWIm
-    resize: 240x320
-    type: GRAYSCALE
+    resize: 320x240
+    type: RGB24
   - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/W.png" 
     id: WIm
-    resize: 240x320
-    type: GRAYSCALE
-        
+    resize: 320x240
+    type: RGB24
+  - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/LISTEN.png" 
+    id: LIm
+    resize: 320x240
+    type: RGB24
+  - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/ANSWER.png" 
+    id: AIm
+    resize: 320x240
+    type: RGB24    
+ 
+font:
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 300
+      italic: true
+    id: font_request
+    size: 15 
+ 
+            
 display:
-  - id: raspiaudio_display
+  - id: myDisplay
     platform: ili9xxx
     model: ST7789V
     cs_pin: GPIO40
     dc_pin: GPIO39
     reset_pin: GPIO9
-    invert_colors: false
+    invert_colors: true
     rotation: 90   
     update_interval: never
     auto_clear_enabled: false
-
-# LVGL configuration to display "RASPIAUDIO" with alignment and rotation
-lvgl:
-  displays:
-    - raspiaudio_display
-  pages:
-    # Main Page
-    - id: starting_page
-      widgets:
-        - image:
-            align: CENTER
-            src: raspiIm
-            id: img_id    
-  
-    - id: listening_page
-      widgets:
-        - label:
-            align: CENTER
-            text: "LISTENING"
-            y: -30  # Position label higher to accommodate spinner
-        - spinner:
-            align: CENTER
-            y: 20  # Position spinner below the label
-            height: 50
-            width: 50
-            spin_time: 1000ms
-            arc_length: 60deg
-            arc_width: 8
-            indicator:
-              arc_color: 0x18bcf2
-              arc_width: 8
-
-    - id: answering_page
-      widgets:
-        - label:
-            align: CENTER
-            text: 'ANSWERING'
-
-    - id: waiting_page
-      widgets:
-        - image:
-            align: CENTER
-            src: WFWWIm
-    
-    - id: waitingB_page
-      widgets:
-        - image:
-            align: CENTER
-            src: WIm        
-
+    pages:
+        - id: logoP
+          lambda: |-
+            it.image(0, 0, id(raspiIm));        
+        - id: waitingP
+          lambda: |-
+            it.image(0, 0, id(WFWWIm));        
+        - id: waitingBP
+          lambda: |-
+            it.image(0, 0, id(WIm));        
+        - id: listeningP
+          lambda: |-
+              it.image(0, 0, id(LIm));            
+        - id: answeringP
+          lambda: |-
+              it.image(0, 0, id(AIm));    
+              it.rectangle(20 , 20 , 280 , 30 , Color::BLACK );
+              it.printf(30, 25, id(font_request), Color::BLACK, "%s", id(text_request).state.c_str());
 
 ###############
 # Home Assistant Components
 
 binary_sensor:
-  # Uncomment if using the function button
-  # - platform: gpio
-  #   pin:
-  #     number: GPIO35
-  #     mode:
-  #       input: true
-  #       pullup: true
-  #   id: function_button
-  #   name: Function Button
-  #   disabled_by_default: true
 
   - platform: gpio
     pin:
@@ -243,13 +226,28 @@ binary_sensor:
       mode:
         input: true
         pullup: true
-    id: volume_button
+    id: click_vol
     name: Volume Button
     disabled_by_default: true
     on_click:
       then:
         - voice_assistant.start
 
+  - platform: gpio
+    pin:
+      number: GPIO45
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    id: click_sta
+    name: Volume Button
+    disabled_by_default: true
+    on_click:
+      then:
+        - switch.toggle: use_wake_word
+        - media_player.stop:
+        
   - platform: gpio
     pin:
       number: GPIO10
@@ -316,7 +314,39 @@ sensor:
       mode:
         input: true
         pullup: true
+    on_anticlockwise:
+      then:
+        - light.turn_on: screen_backlight      
+        - lambda: |-
+                id(lightTO) = 0;        
+    on_clockwise:
+      then:
+        - light.turn_on: screen_backlight
+        - lambda: |-
+                id(lightTO) = 0;    
+                
+text_sensor:
+  - id: text_request
+    platform: template
+    on_value:
+      lambda: |-
+        if(id(text_request).state.length()>32) {
+          std::string name = id(text_request).state.c_str();
+          std::string truncated = esphome::str_truncate(name.c_str(),31);
+          id(text_request).state = (truncated+"...").c_str();
+        }
 
+  - id: text_response
+    platform: template
+    on_value:
+      lambda: |-
+        if(id(text_response).state.length()>32) {
+          std::string name = id(text_response).state.c_str();
+          std::string truncated = esphome::str_truncate(name.c_str(),31);
+          id(text_response).state = (truncated+"...").c_str();
+        }
+               
+                    
 switch:
   - platform: template
     name: Use Wake Word
@@ -363,52 +393,39 @@ voice_assistant:
         id: screen_backlight
         brightness: 100%
         effect: none
-    - lvgl.page.show: listening_page
+    - script.execute: listening
+    - script.wait: listening
+
+  on_stt_end:
+    - text_sensor.template.publish:
+        id: text_request
+        state: !lambda return x;
 
   on_tts_start:
     - logger.log: "🔵Voice Assistant is now streaming answer"
     - light.turn_on:
         id: screen_backlight
         brightness: 100%
-        effect: none
-    - lvgl.page.show: answering_page
-
-  # Ici on va vérifier régulièrement si le media_player diffuse toujours du son
-  # et on attend qu'il termine pour revenir à la page 'waiting_page'
-  on_tts_end:
-    - logger.log: "🔵Waiting for media playback to finish"
-    - wait_until:
-        not:
-          media_player.is_playing: raspiaudio_speaker  # On attend que la lecture se termine    
-    - logger.log: "🔵TTS playback finished, switching to waiting page"
-    - script.execute: reset_display
-
-  on_client_connected:
+        effect: none                     
+    - script.execute: answering
+    - script.wait: answering        
     - delay: 5sec
-    - if:
-        condition:
-          switch.is_on: use_wake_word
-        then:
-          - voice_assistant.start_continuous
-          - lvgl.page.show: waiting_page  
-        else:
-          - lvgl.page.show: waitingB_page  
-          
+    - logger.log: "🔵Waiting for media playback to finish"
+    - delay: 5sec
+    - wait_until:
+          media_player.is_idle: raspiaudio_speaker  # On attend que la lecture se termine    
+    - logger.log: "🔵TTS playback finished, switching to waiting page"
+    - delay: 1sec
+    - script.execute: reset_display
+    - script.wait: reset_display
+                
   on_client_disconnected:
     - if:
         condition:
           switch.is_on: use_wake_word
         then:
           - voice_assistant.stop
-
-  on_end:
-    - delay: 100ms
-    - wait_until:
-        not:
-          media_player.is_playing: raspiaudio_speaker          
-    - script.execute: reset_display
-
-
+          
   on_error:
     - light.turn_on:
         id: screen_backlight
@@ -432,13 +449,8 @@ script:
     - light.turn_on: screen_backlight
     - lambda: |-
                 id(lightTO) = 0;    
-    - if:
-        condition:
-            switch.is_on: use_wake_word
-        then:
-            - lvgl.page.show: waiting_page  # Réafficher la page waiting à la fin
-        else:
-            - lvgl.page.show: waitingB_page  # Réafficher la page waiting à la fin    
+    - script.execute: waiting
+    - script.wait: waiting 
     
  
 
@@ -455,3 +467,48 @@ script:
           else:
             - logger.log: "Turning on DAC mute"
             - output.turn_on: dac_mute
+            
+               
+  - id: logo
+    then:
+       - lambda: |-
+           id(myDisplay).show_page(logoP);
+           id(myDisplay).update();         
+           id(lightTO) = 0;
+       - light.turn_on: screen_backlight                        
+           
+           
+              
+  - id: waiting
+    then:
+       - if:
+           condition:
+               switch.is_on: use_wake_word
+           then:
+               - voice_assistant.start_continuous
+               - lambda: |-
+                   id(myDisplay).show_page(waitingP);
+                   id(myDisplay).update();      
+                   id(lightTO) = 0;
+               - light.turn_on: screen_backlight                                                            
+           else: 
+               - lambda: |-
+                   id(myDisplay).show_page(waitingBP);
+                   id(myDisplay).update();       
+                   id(lightTO) = 0;
+               - light.turn_on: screen_backlight                                          
+  - id: listening
+    then:
+       - lambda: |-
+            id(myDisplay).show_page(listeningP);  
+            id(myDisplay).update();     
+            id(lightTO) = 0;
+       - light.turn_on: screen_backlight                                                                                    
+  - id: answering
+    then:
+       - lambda: |-
+            id(myDisplay).show_page(answeringP);          
+            id(myDisplay).update();          
+            id(lightTO) = 0;
+       - light.turn_on: screen_backlight                
+                         

@@ -182,7 +182,12 @@ font:
       italic: true
     id: font_request
     size: 15 
- 
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 300
+    id: font_response
+    size: 15 
             
 display:
   - id: myDisplay
@@ -213,7 +218,8 @@ display:
               it.image(0, 0, id(AIm));    
               it.rectangle(20 , 20 , 280 , 30 , Color::BLACK );
               it.printf(30, 25, id(font_request), Color::BLACK, "%s", id(text_request).state.c_str());
-
+              it.rectangle(20 , 190 , 280 , 30 , Color::BLACK );
+              it.printf(30, 195, id(font_response), Color::BLACK, "%s", id(text_response).state.c_str());
 ###############
 # Home Assistant Components
 
@@ -330,9 +336,9 @@ text_sensor:
     platform: template
     on_value:
       lambda: |-
-        if(id(text_request).state.length()>32) {
+        if(id(text_request).state.length()>40) {
           std::string name = id(text_request).state.c_str();
-          std::string truncated = esphome::str_truncate(name.c_str(),31);
+          std::string truncated = esphome::str_truncate(name.c_str(),39);
           id(text_request).state = (truncated+"...").c_str();
         }
 
@@ -403,6 +409,9 @@ voice_assistant:
 
   on_tts_start:
     - logger.log: "🔵Voice Assistant is now streaming answer"
+    - text_sensor.template.publish: 
+        id: text_response
+        state: !lambda return x;
     - light.turn_on:
         id: screen_backlight
         brightness: 100%
@@ -413,7 +422,7 @@ voice_assistant:
     - logger.log: "🔵Waiting for media playback to finish"
     - delay: 5sec
     - wait_until:
-          media_player.is_idle: raspiaudio_speaker  # On attend que la lecture se termine    
+          media_player.is_idle: raspiaudio_speaker      
     - logger.log: "🔵TTS playback finished, switching to waiting page"
     - delay: 1sec
     - script.execute: reset_display

@@ -65,15 +65,15 @@ void ES8388Component::setup() {
    // ADC attenuation 0 dB   
    this->write_byte(16,0x00);
    this->write_byte(17,0x00);
-
+/*
 //ALC on PGA max Gain Max 11.5 dB Gain Min 0
-#   this->write_byte(18, 0xDA);
+   this->write_byte(18, 0xDA);
    //ALC Target 4.5dB hold time 0
-#   this->write_byte(19, 0xA0);
+   this->write_byte(19, 0xA0);
    //Decay time 820us Attack time 416 us
-#   this->write_byte(20, 0x12);  
-#   this->write_byte(21, 0x06);   
-
+   this->write_byte(20, 0x12);  
+   this->write_byte(21, 0x06);   
+*/
    // noise gate -76.5dB
   this->write_byte(22, 0x03);      
  //ADC power  

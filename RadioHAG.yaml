@@ -1,0 +1,473 @@
+substitutions:
+  name: raspiaudio-radio
+  friendly_name: Raspiaudio Radio
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2024.9.1
+  platformio_options:
+    board_build.flash_mode: dio
+    board_build.arduino.memory_type: qio_opi
+  on_boot:
+    priority: -100.0
+    then:
+      - output.turn_off: dac_mute
+      - light.turn_on:
+          id: screen_backlight
+          brightness: 100%
+      - lambda: |-
+              id(lightTO) = 0;
+              id(phase) = 0;
+      - script.execute: reset_display
+
+            
+external_components:
+  - source: github://RASPIAUDIO/esphomeRadio@main
+    components: [es8388]
+    refresh: 0s
+  - source: github://jesserockz/esphome-components
+    components: [file]
+    refresh: 0s
+  - source: github://pr#5230
+    components: esp_adf
+    refresh: 0s
+        
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+#micro_wake_word:
+#  models:
+#    - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+#    - model: github://esphome/micro-wake-word-models/models/v2/okay_nabu.json
+#    - model: github://esphome/micro-wake-word-models/models/v2/alexa.json
+#    - model: github://esphome/micro-wake-word-models/models/v2/hey_jarvis.json
+#  on_wake_word_detected:
+#    - voice_assistant.start:
+#        wake_word: !lambda return wake_word;
+#  vad:
+#    model: github://esphome/micro-wake-word-models/models/v2/vad.json@main    
+         
+ota:
+  platform: esphome
+  
+api:
+  on_client_connected:
+    - script.execute: reset_display
+  on_client_disconnected:
+    - script.execute: reset_display
+
+
+wifi:
+  ap:
+     ssid: "Raspiaudio-radio"
+     password: "12345678"
+
+captive_portal:
+                
+#improv_serial: 
+
+logger:
+
+##########
+# Hardware Configuration
+es8388:
+ 
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+#######
+# Buses Configuration
+
+i2c:
+  sda: GPIO18
+  scl: GPIO11
+  id: i2c_bus
+
+spi:
+  - id: spi_bus0
+    clk_pin: GPIO12
+    mosi_pin: GPIO8
+    # miso_pin: GPIOXX
+    interface: hardware
+
+i2s_audio:
+  - id: i2s_shared
+    i2s_lrclk_pin: GPIO16
+    i2s_bclk_pin: GPIO5
+    i2s_mclk_pin: GPIO0
+
+#####################
+# Internal Components
+
+output:
+  - platform: gpio
+    id: dac_mute
+    pin:
+      number: GPIO46
+      inverted: true
+      mode:
+        output: true
+
+
+  - platform: ledc
+    pin:
+      number: GPIO41
+      mode:
+        output: true
+    id: screen_backlight_pin
+
+light:
+  - platform: monochromatic
+    output: screen_backlight_pin
+    id: screen_backlight
+    name: Screen Backlight
+    restore_mode: ALWAYS_ON
+    
+       
+globals:
+  - id: lightTO
+    type: int
+    initial_value: '0'
+  - id: Vol
+    type: float
+    initial_value: '0.5'    
+  - id: phase
+    type: int
+    initial_value: '0'
+        
+
+interval:
+  - interval: 1sec
+    then:
+      - if:
+          condition:  
+            and:
+              - light.is_on: screen_backlight
+              - lambda: 'return id(lightTO) < 60;'              
+          then:
+            - lambda: |-
+                id(lightTO)++;
+          else:
+            - lambda: |-
+                id(lightTO) = 0;
+            - light.turn_off: screen_backlight               
+             
+microphone:
+  - platform: i2s_audio
+    id: raspiaudio_microphone
+    i2s_din_pin: GPIO4
+    adc_type: external
+    pdm: false
+    
+image:
+  - file: "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/images/Raspiaudio.png"
+    id: raspiIm
+    resize: 320x240
+    type: RGB24
+  - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/images/WFWW.png" 
+    id: WFWWIm
+    resize: 320x240
+    type: RGB24
+  - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/images/W.png" 
+    id: WIm
+    resize: 320x240
+    type: RGB24
+  - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/images/LISTEN.png" 
+    id: LIm
+    resize: 320x240
+    type: RGB24
+  - file:  "https://github.com/RASPIAUDIO/esphomeRadio/raw/main/images/ANSWER.png" 
+    id: AIm
+    resize: 320x240
+    type: RGB24    
+
+     
+font:
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 300
+      italic: true
+    id: font_request
+    size: 15 
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 300
+    id: font_response
+    size: 15 
+            
+display:
+  - id: myDisplay
+    platform: ili9xxx
+    model: ST7789V
+    cs_pin: GPIO40
+    dc_pin: GPIO39
+    reset_pin: GPIO9
+    invert_colors: true
+    rotation: 90   
+    update_interval: never
+    auto_clear_enabled: false
+    pages:
+        - id: logoP
+          lambda: |-
+            it.image(0, 0, id(raspiIm));        
+        - id: waitingP
+          lambda: |-
+            it.image(0, 0, id(WFWWIm));        
+        - id: waitingBP
+          lambda: |-
+            it.image(0, 0, id(WIm));        
+        - id: listeningP
+          lambda: |-
+              it.image(0, 0, id(LIm));            
+        - id: answeringP
+          lambda: |-
+              it.image(0, 0, id(AIm));    
+              it.rectangle(20 , 20 , 280 , 30 , Color::BLACK );
+              it.printf(30, 25, id(font_request), Color::BLACK, "%s", id(text_request).state.c_str());
+              it.rectangle(20 , 190 , 280 , 30 , Color::BLACK );
+              it.printf(30, 195, id(font_response), Color::BLACK, "%s", id(text_response).state.c_str());
+
+# Home Assistant Components            
+sensor:
+  - platform: rotary_encoder
+    name: "Volume"
+    id: volume_encoder
+    pin_a:
+      number: GPIO42
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO3
+      mode:
+        input: true
+        pullup: true
+    on_anticlockwise:
+      then:
+        - light.turn_on: screen_backlight      
+        - lambda: |-
+                id(lightTO) = 0;       
+                id(Vol) -= 0.1;
+                if(id(Vol) < 0) id(Vol) = 0;                  
+        - speaker.volume_set: !lambda "return id(Vol);"
+    on_clockwise:
+      then:
+
+        - light.turn_on: screen_backlight
+        - lambda: |-
+                id(lightTO) = 0;        
+                id(Vol) += 0.1;
+                if(id(Vol) > 1) id(Vol) = 1;     
+        - speaker.volume_set: !lambda "return id(Vol);"                
+                
+  - platform: rotary_encoder
+    name: "Function"
+    id: function_encoder
+    pin_a:
+      number: GPIO7
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO6
+      mode:
+        input: true
+        pullup: true
+    on_anticlockwise:
+      then:
+        - light.turn_on: screen_backlight      
+        - lambda: |-
+                id(lightTO) = 0;       
+    on_clockwise:
+      then:
+        - light.turn_on: screen_backlight
+        - lambda: |-
+                id(lightTO) = 0;    
+               
+text_sensor:
+  - id: text_request
+    platform: template
+    on_value:
+      lambda: |-
+        if(id(text_request).state.length()>40) {
+          std::string name = id(text_request).state.c_str();
+          std::string truncated = esphome::str_truncate(name.c_str(),39);
+          id(text_request).state = (truncated+"...").c_str();
+        }
+
+  - id: text_response
+    platform: template
+    on_value:
+      lambda: |-
+        if(id(text_response).state.length()>32) {
+          std::string name = id(text_response).state.c_str();
+          std::string truncated = esphome::str_truncate(name.c_str(),31);
+          id(text_response).state = (truncated+"...").c_str();
+        }
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO48
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    id: click_vol
+    name: Volume Button
+    disabled_by_default: true
+    on_click:
+      then:        
+          - lambda: id(phase) = 1;    
+          - script.execute: reset_display
+      
+                                 
+switch:
+  - platform: template
+    name: Use Wake Word
+    id: use_wake_word
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - lambda:  id(va).set_use_wake_word(true);
+      - script.execute: reset_display
+    on_turn_off:
+      - lambda: id(va).set_use_wake_word(false);
+      - script.execute: reset_display
+     
+speaker:
+   - platform: i2s_audio
+     id: raspiaudio_speaker
+     dac_type: external
+     i2s_dout_pin: GPIO17
+     i2s_audio_id: i2s_shared
+     channel: mono
+          
+voice_assistant:
+  id: va
+  microphone: raspiaudio_microphone
+  speaker: raspiaudio_speaker
+  use_wake_word: true
+  on_listening:
+    - logger.log: "listening 3 => phase"
+    - light.turn_on:
+        id: screen_backlight
+        brightness: 100%
+        effect: none
+    - lambda: |-
+        id(phase) = 3;
+    - script.execute: reset_display    
+
+  on_stt_end:
+    - text_sensor.template.publish:
+        id: text_request
+        state: !lambda return x;
+
+  on_tts_start:
+    - logger.log: "answering  4 => phase"
+    - text_sensor.template.publish: 
+        id: text_response
+        state: !lambda return x;
+    - light.turn_on:
+        id: screen_backlight
+        brightness: 100%
+        effect: none                     
+    - lambda: |-
+        id(phase) = 4;
+    - script.execute: reset_display          
+ 
+
+  on_tts_stream_end:
+    - logger.log: "TTS playback finished, switching to waiting page"
+    - delay: 1sec
+    - lambda: id(phase) = 1;
+    - script.execute: reset_display
+
+
+                
+  on_client_disconnected:
+    - if:
+        condition:
+          switch.is_on: use_wake_word
+        then:
+          - voice_assistant.stop
+          
+  on_error:
+    - light.turn_on:
+        id: screen_backlight
+        brightness: 100%
+        effect: none
+    - delay: 1s
+    - lambda: id(phase) = 1;    
+    - script.execute: reset_display
+
+#    - lambda: |-
+#        if (code == "wake-provider-missing" || code == "wake-engine-missing") {
+#          id(use_wake_word).turn_off();
+#        }
+
+
+#########
+# Scripts
+
+script:
+  - id: reset_display
+    then:   
+       - lambda: |-
+             if(id(phase) == 0)id(logo).execute();
+             if(id(phase) == 1)id(waiting).execute();          
+             if(id(phase) == 3)id(listening).execute();
+             if(id(phase) == 4)id(answering).execute();
+
+  - id: logo
+    then:
+       - lambda: |-
+           id(myDisplay).show_page(logoP);
+           id(myDisplay).update();         
+           id(lightTO) = 0;
+       - light.turn_on: screen_backlight   
+       - delay: 10sec
+       - lambda: id(phase) = 1;        
+       - script.execute: reset_display       
+       
+  - id: waiting  
+    then:   
+#             - if:
+#                   condition:
+#                      not:
+#                        voice_assistant.is_running
+#                   then:
+             - voice_assistant.start                      
+             - lambda: |-
+                   id(va).set_use_wake_word(true) ; 
+                   id(myDisplay).show_page(waitingP);
+                   id(myDisplay).update();      
+                   id(lightTO) = 0;
+             - light.turn_on: screen_backlight 
+             
+                                                        
+  - id: listening
+    then:
+       - lambda: |-
+            id(myDisplay).show_page(listeningP);  
+            id(myDisplay).update();     
+            id(lightTO) = 0;
+       - light.turn_on: screen_backlight   
+                                                                                        
+  - id: answering
+    then:
+       - lambda: |-
+            id(myDisplay).show_page(answeringP);          
+            id(myDisplay).update();          
+            id(lightTO) = 0;
+       - light.turn_on: screen_backlight                
+                         

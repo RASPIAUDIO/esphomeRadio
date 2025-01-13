@@ -54,7 +54,7 @@ void ES8388Component::setup() {
 
    // differential, stereo,  Right => LINPUT1/RINPUT1  , Left => LINPUT2/RINPUT2
    this->write_byte(10,0xFC);  
-   this->write_byte(11,0x00);
+   this->write_byte(11,0x02);
 
    //i2S 16b
    this->write_byte(12,0x0C); 

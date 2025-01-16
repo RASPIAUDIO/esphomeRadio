@@ -89,9 +89,22 @@ void ES8388Component::setup() {
   // unmute
   this->write_byte(0x19, 0x00);
 }
+void ES8388Component::set_volume(float volume) {
+  // Limitez le volume entre 0.0 et 1.0
+  if (volume < 0.0f) volume = 0.0f;
+  if (volume > 1.0f) volume = 1.0f;
 
-void ES8388Component::set_volume(float vol) 
-{
+  // Convertissez le volume en une valeur comprise entre 0x00 et 0xFF
+  uint8_t volume_value = static_cast<uint8_t>(volume * 32);
+
+  // Écrire dans les registres du DAC pour définir le volume
+  this->write_byte(0x2E, volume_value); // Volume gauche
+  this->write_byte(0x2F, volume_value); // Volume droit
+}
+static const char *TAG = "es8388";
+
+SetVolumeAction *ES8388Component::make_set_volume_action() {
+  return new SetVolumeAction(this);
 }
 
 }  // namespace es8388

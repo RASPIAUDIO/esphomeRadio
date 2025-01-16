@@ -8,12 +8,13 @@ class ES8388Component : public Component, public i2c::I2CDevice {
  public:
   void setup() override;
   void set_volume(float volume);
+  SetVolumeAction *make_set_volume_action();
 };
 class SetVolumeAction : public Action<> {
  public:
   SetVolumeAction(ES8388Component *parent) : parent_(parent) {}
-
-  void play(float volume) { this->volume_ = volume; }
+  
+  void set_volume(float volume) { this->volume_ = volume; }
 
   void play() override {
     if (this->parent_ != nullptr) {

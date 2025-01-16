@@ -7,7 +7,7 @@ namespace es8388 {
 class ES8388Component : public Component, public i2c::I2CDevice {
  public:
   void setup() override;
-  void set_volume();
+  void set_volume(float) override;
 };
 
 }  // namespace es8388

@@ -101,7 +101,7 @@ void ES8388Component::set_volume(float volume) {
   this->write_byte(0x2E, volume_value); // Volume gauche
   this->write_byte(0x2F, volume_value); // Volume droit
 }
-static const char *TAG = "es8388";
+
 
 SetVolumeAction *ES8388Component::make_set_volume_action() {
   return new SetVolumeAction(this);

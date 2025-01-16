@@ -3,7 +3,7 @@
 #include "esphome/core/automation.h"
 namespace esphome {
 namespace es8388 {
-
+class SetVolumeAction;
 class ES8388Component : public Component, public i2c::I2CDevice {
  public:
   void setup() override;
@@ -12,7 +12,7 @@ class ES8388Component : public Component, public i2c::I2CDevice {
 };
 class SetVolumeAction : public Action<> {
  public:
-  SetVolumeAction(ES8388Component *parent) : parent_(parent) {}
+  explicit SetVolumeAction(ES8388Component *parent) : parent_(parent) {}
   
   void set_volume(float volume) { this->volume_ = volume; }
 

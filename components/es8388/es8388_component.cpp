@@ -90,5 +90,9 @@ void ES8388Component::setup() {
   this->write_byte(0x19, 0x00);
 }
 
+void ES8388Component::set_volume(float vol) 
+{
+}
+
 }  // namespace es8388
 }  // namespace esphome

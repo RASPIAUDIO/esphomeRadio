@@ -1,7 +1,6 @@
 
 #include "es8388_component.h"
 #include "esphome/core/hal.h"
-
 #include <soc/io_mux_reg.h>
 
 namespace esphome {

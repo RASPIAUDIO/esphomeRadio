@@ -1,0 +1,3026 @@
+substitutions:
+  name: raspiaudio-radio-full
+  friendly_name: Raspiaudio Radio Full
+
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.9.0
+  name_add_mac_suffix: false
+  project:
+    name: raspiaudio.radio-full
+    version: "2026.9.5"
+  on_boot:
+    - priority: 800
+      then:
+        - light.turn_off: screen_backlight
+        - wait_until:
+            condition:
+              lambda: return id(myDisplay).is_ready();
+            timeout: 3s
+        - if:
+            condition:
+              lambda: return id(myDisplay).is_ready();
+            then:
+              - lambda: |-
+                    id(myDisplay).show_page(logoP);
+                    id(myDisplay).update();
+              - light.turn_on: screen_backlight
+            else:
+              - logger.log: "Display not ready during boot splash"
+            
+    - priority: -100
+      then:
+        - output.turn_off: dac_mute
+        - light.turn_on:
+            id: screen_backlight
+            brightness: 100%
+        - lambda: |-
+                id(lightTO) = 0;
+                id(phase) = 0;
+        - media_player.volume_set:
+                id: speaker_media_player
+                volume: !lambda return id(Vol);
+        - script.execute: reset_display
+#      - lambda: id(my_es8388).set_volume(0.0);
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+
+preferences:
+  flash_write_interval: 5s
+  
+psram:
+  mode: octal
+  speed: 80MHz
+
+external_components:
+  - source: github://RASPIAUDIO/esphomeRadio@187efd71c9682f92dc03d22c546e6dcb729c4c36
+    components: [es8388]
+
+api:
+  # Music Assistant must keep playing when Home Assistant is offline.
+  reboot_timeout: 0s
+# on_client_connected:
+#    - script.execute: reset_display
+#  on_client_disconnected:
+#    - script.execute: reset_display
+
+logger:
+  level: DEBUG
+  logs:
+    sensor: WARN
+
+wifi:
+#  ssid: xxxxx
+#  password: yyyyy
+#  power_save_mode: none
+  ap:
+     ssid: "Raspiaudio-radio-full"
+     password: "12345678"
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+
+captive_portal:
+
+improv_serial:
+
+remote_receiver:
+  id: ir_receiver
+  pin:
+    number: GPIO47
+    inverted: true
+  dump: nec
+  on_nec:
+    then:
+      - if:
+          condition:
+            lambda: 'return x.command == 0xBF40;'
+          then:
+            - logger.log: "IR volume up"
+            - script.execute:
+                id: adjust_volume
+                delta: 0.05
+      - if:
+          condition:
+            lambda: 'return x.command == 0xB748;'
+          then:
+            - logger.log: "IR volume down"
+            - script.execute:
+                id: adjust_volume
+                delta: -0.05
+      - if:
+          condition:
+            lambda: 'return((x.command == 0xFE01) && (x.address == 0xFE01));'
+          then:
+            - logger.log: "IR mute"
+            - script.execute: mute_unmute
+      - if:
+          condition:
+            lambda: 'return((x.command == 0xF609) && (x.address == 0xFE01));'
+          then:
+            - logger.log: "IR ret"
+            - if:
+                condition:
+                  lambda: |-
+                    return id(music_active) || id(assist_return_to_ma) ||
+                        id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING;
+                then:
+                  - script.execute: temporary_assist
+                else:
+                  - script.execute: go_assist
+es8388:
+#  id: my_es8388
+
+i2c:
+  id: codec_bus
+  scl: GPIO11
+  sda: GPIO18
+  scan: true
+i2c_device:
+  id: my_es8388
+  address: 0x10
+
+spi:
+  - id: spi_bus0
+    clk_pin: GPIO12
+    mosi_pin: GPIO8
+    # miso_pin: GPIOXX
+    interface: hardware
+
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin: GPIO16
+    i2s_bclk_pin: GPIO5
+    i2s_mclk_pin: GPIO0
+
+microphone:
+  - platform: i2s_audio
+    id: radio_mic
+    sample_rate: 16000
+    i2s_din_pin: GPIO4
+    bits_per_sample: 16bit
+    adc_type: external
+
+
+speaker:
+  - platform: i2s_audio
+    id: radio_speaker
+    i2s_audio_id: i2s_audio_bus
+    i2s_dout_pin: GPIO17
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: stereo
+    buffer_duration: 500ms
+  - platform: mixer
+    id: radio_mixer
+    output_speaker: radio_speaker
+    num_channels: 2
+    source_speakers:
+      - id: assist_mixer_input
+      - id: music_mixer_input
+  - platform: resampler
+    id: assist_speaker
+    output_speaker: assist_mixer_input
+    sample_rate: 48000
+  - platform: resampler
+    id: music_speaker
+    output_speaker: music_mixer_input
+    sample_rate: 48000
+
+sendspin:
+  id: sendspin_hub
+
+media_source:
+  - platform: sendspin
+    id: sendspin_source
+    buffer_size: 2000000
+
+
+
+media_player:
+  - platform: speaker
+    name: None
+    id: speaker_media_player
+#    volume_min: 0.5
+#    volume_max: 0.8
+#   internal: false
+#   task_stack_in_psram: true
+    announcement_pipeline:
+      speaker: assist_speaker
+      format: WAV
+      sample_rate: 48000
+      num_channels: 1
+    files:
+      - id: little_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+
+    on_announcement:
+      - if:
+          condition:
+            lambda: 'return(id(phase) != 2);'
+          then:
+            - lambda: |-
+                id(lightTO) = 0;
+                if (id(phase) == 1) {
+                  id(phase) = 2;
+                  id(external_player).execute();
+                }
+            - if:
+                condition:
+                  lambda: 'return id(auto_mute_active);'
+                then:
+                  - script.execute: mute_off
+      - micro_wake_word.stop:
+
+    on_idle:
+      - wait_until:
+         and:
+          - not:
+              media_player.is_announcing:
+                id: speaker_media_player
+          - not:
+              voice_assistant.is_running:
+      - if:
+          condition:
+              lambda: 'return !id(assist_return_to_ma) && id(phase) == 4;'
+          then:
+            - lambda: |-
+                  id(phase) = 1;
+            - script.execute: reset_display
+      - if:
+          condition:
+               lambda: 'return !id(assist_return_to_ma) && id(phase) == 2;'
+          then:
+            - lambda: |-
+                  id(phase) = 1;
+            - script.execute: reset_display
+
+  - platform: sendspin
+    id: sendspin_media_player
+    name: Radio Music Assistant
+    volume_increment: 2%
+    on_state:
+      - if:
+          condition:
+            media_player.is_playing: sendspin_media_player
+          then:
+            - script.stop: enter_idle_mode
+            - micro_wake_word.stop:
+      - script.execute: schedule_music_refresh
+
+  - platform: speaker_source
+    id: music_source_player
+    internal: true
+    on_state:
+      - lambda: |-
+          using media_player::MediaPlayerState;
+          const bool playing = id(music_source_player).state == MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;
+          if (playing != id(music_active)) {
+            id(music_active) = playing;
+            id(update_playback_mode).execute();
+          }
+    media_pipeline:
+      speaker: music_speaker
+      sources:
+        - sendspin_source
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 2
+
+micro_wake_word:
+  id: mww
+  microphone: radio_mic
+  stop_after_detection: false
+  models:
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+      id: okay_nabu
+    - model: hey_jarvis
+      id: hey_jarvis
+    - model: hey_mycroft
+      id: hey_mycroft
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+      id: stop
+      internal: true
+  on_wake_word_detected:
+    - if:
+        condition:
+          lambda: |-
+            return !id(mic_muted) && !id(music_active) &&
+                id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING;
+        then:
+          - light.turn_on:
+              id: screen_backlight
+              brightness: 100%
+              effect: none
+          - voice_assistant.start:
+              wake_word: !lambda return wake_word;
+
+voice_assistant:
+  id: va
+  microphone: radio_mic
+  media_player: speaker_media_player
+  micro_wake_word: mww
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 2.0
+  on_listening:
+    - logger.log: "listening 3 => phase"
+    - micro_wake_word.stop:
+    - light.turn_on:
+        id: screen_backlight
+        brightness: 100%
+        effect: none
+    - lambda: |-
+        id(phase) = 3;
+
+    - script.execute: reset_display
+
+  on_stt_end:
+    - text_sensor.template.publish:
+        id: text_request
+        state: !lambda return x;
+
+  on_tts_start:
+    - logger.log: "answering  4 => phase"
+    - text_sensor.template.publish:
+        id: text_response
+        state: !lambda return x;
+    - light.turn_on:
+        id: screen_backlight
+        brightness: 100%
+        effect: none
+    - lambda: |-
+        id(phase) = 4;
+    - script.execute: reset_display
+
+
+  on_end:
+    - wait_until:
+        and:
+          - not:
+              media_player.is_announcing:
+                id: speaker_media_player
+          - not:
+              voice_assistant.is_running:
+    - if:
+        condition:
+          lambda: 'return id(assist_return_to_ma);'
+        then:
+          - script.execute: finish_temporary_assist
+        else:
+          - if:
+              condition:
+                lambda: 'return !id(music_active) && (id(phase) != 1);'
+              then:
+                - lambda: id(phase) = 1;
+                - script.execute: reset_display
+
+
+
+  on_error:
+    - logger.log: "ERROR!!!!!!!!!!!!!!!!"
+    - light.turn_on:
+        id: screen_backlight
+        brightness: 100%
+        effect: none
+    - delay: 1s
+    - if:
+        condition:
+          lambda: 'return id(assist_return_to_ma);'
+        then:
+          - script.execute: finish_temporary_assist
+        else:
+          - lambda: 'if (!id(music_active)) id(phase) = 1;'
+          - script.execute: reset_display
+
+
+#####################
+# Internal Components
+output:
+  - platform: gpio
+    id: dac_mute
+    pin:
+      number: GPIO46
+      inverted: true
+      mode:
+        output: true
+      ignore_strapping_warning: true
+
+  - platform: ledc
+    pin:
+      number: GPIO41
+      mode:
+        output: true
+    id: screen_backlight_pin
+
+light:
+  - platform: monochromatic
+    output: screen_backlight_pin
+    id: screen_backlight
+    name: Screen Backlight
+
+
+globals:
+  - id: music_active
+    type: bool
+    initial_value: 'false'
+  - id: assist_return_to_ma
+    type: bool
+    initial_value: 'false'
+  - id: assist_left_ma_group
+    type: bool
+    initial_value: 'false'
+  - id: preset_message
+    type: std::string
+    initial_value: '""'
+  - id: ma_player_entity_id
+    type: std::string
+    restore_value: true
+    max_restore_data_length: 96
+    initial_value: '""'
+  - id: lightTO
+    type: int
+    initial_value: '0'
+  - id: Vol
+    type: float
+    initial_value: '0.6'
+    restore_value: true
+  - id: phase
+    type: int
+    initial_value: '0'
+  - id: mute
+    type: bool
+    initial_value: 'false'
+  - id: mic_muted
+    type: bool
+    initial_value: 'false'
+  - id: auto_mute_active
+    type: bool
+    initial_value: 'false'
+  - id: volume_display_active
+    type: bool
+    initial_value: 'false'
+  - id: volume_display_timer
+    type: int
+    initial_value: '0'
+
+
+interval:
+  - interval: 1sec
+    then:
+
+      - if:
+          condition:
+            and:
+              - light.is_on: screen_backlight
+              - lambda: 'return id(lightTO) < 60;'
+          then:
+            - lambda: id(lightTO)++;
+          else:
+            - lambda: id(lightTO) = 0;
+            - light.turn_off: screen_backlight
+      - if:
+          condition:
+            lambda: 'return id(volume_display_active);'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(volume_display_timer) >= 3;'
+                then:
+                  - lambda: |-
+                      id(volume_display_active) = false;
+                      id(volume_display_timer) = 0;
+                      if (id(myDisplay).is_ready()) {
+                        id(myDisplay).update();
+                      }
+                else:
+                  - lambda: id(volume_display_timer)++;
+
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(phase) == 0;'
+              - not:
+                  light.is_on: screen_backlight
+          then:
+            - light.turn_on: screen_backlight
+
+
+image:
+  - platform: file
+    file: images/Raspiaudio.png
+    id: raspiIm
+    resize: 320x240
+    type: RGB
+  - platform: file
+    file: images/WFWW.png
+    id: WFWWIm
+    resize: 320x240
+    type: RGB
+  - platform: file
+    file: images/W.png
+    id: WIm
+    resize: 320x240
+    type: RGB
+  - platform: file
+    file: images/LISTEN.png
+    id: LIm
+    resize: 320x240
+    type: RGB
+  - platform: file
+    file: images/ANSWER.png
+    id: AIm
+    resize: 320x240
+    type: RGB
+  - platform: file
+    file: images/mute_mic.png
+    id: muteMicIm
+    resize: 320x240
+    type: RGB
+  - platform: file
+    file: images/mute_speaker.png
+    id: muteSpeakerIm
+    resize: 320x240
+    type: RGB
+
+font:
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 300
+    id: font_request
+    size: 15
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 300
+    id: font_response
+    size: 15
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 300
+    id: font_battery_small
+    size: 9
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 700
+    id: font_wifi_label
+    size: 9
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 600
+    id: ma_font_station
+    size: 28
+    glyphs: &ma_glyphs
+      - " "
+      - "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      - "abcdefghijklmnopqrstuvwxyz"
+      - "0123456789"
+      - ".,;:!?-_/\\()[]{}<>|@#&+=*\"'%"
+      - "°"
+      - "àâäáãåçéèêëíìîïñóòôöõúùûüýÿ"
+      - "ÀÂÄÁÃÅÇÉÈÊËÍÌÎÏÑÓÒÔÖÕÚÙÛÜÝ"
+      - "œŒæÆ"
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 500
+    id: ma_font_heading
+    size: 22
+    glyphs: *ma_glyphs
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 500
+    id: ma_font_metadata
+    size: 18
+    glyphs: *ma_glyphs
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 500
+    id: ma_font_status
+    size: 14
+    glyphs: *ma_glyphs
+
+color:
+  - id: green
+    hex: '75D15F'
+  - id: red
+    hex: 'FF3131'
+  - id: blue
+    hex: '47B7E9'
+  - id: amber
+    hex: 'FBAB35'
+  - id: lime
+    hex: '20FC30'
+  - id: pink
+    hex: 'D92BBC'
+  - id: yellow
+    hex: 'FFC000'
+  - id: black
+    hex: '000000'
+  - id: white
+    hex: 'ffffff'
+  - id: purple
+    hex: '73264D'
+  - id: light_blue
+    hex: 'CFE2F3'
+  - id: bg_blue
+    hex: '032341'
+  - id: bg_purple
+    hex: '301020'
+  - id: bg_green
+    hex: '05350B'
+  - id: bg_red
+    hex: '3C0000'
+  - id: bg_pink
+    hex: '61034D'
+  - id: bg_charcoal
+    hex: '323232'
+  - id: bg_brown
+    hex: '41220D'
+  - id: bg_grey
+    hex: '4F4F4F'
+  - id: light_green
+    hex: 'AAD1AA'
+  # Music Assistant palette shared with esphomeRadioMusic.
+  - id: ma_bg
+    hex: '08131F'
+  - id: ma_header
+    hex: '12314A'
+  - id: ma_panel
+    hex: '0E2235'
+  - id: ma_footer
+    hex: '163A54'
+  - id: ma_accent
+    hex: 'E4B95B'
+  - id: ma_text
+    hex: 'F2F6F9'
+  - id: ma_text_muted
+    hex: 'A7BECE'
+  - id: ma_bar_bg
+    hex: '24455E'
+  - id: ma_bar_fill
+    hex: '79D4C8'
+  - id: ma_battery_low
+    hex: 'D95C5C'
+       
+
+display:
+  - id: myDisplay
+    platform: ili9xxx
+    spi_id: spi_bus0
+    model: ST7789V
+    cs_pin: GPIO40
+    dc_pin: GPIO39
+    reset_pin: GPIO9
+    invert_colors: true
+    rotation: 90
+    update_interval: never
+    auto_clear_enabled: false
+    pages:
+        - id: presetP
+          lambda: |-
+            const int w = it.get_width();
+            const int h = it.get_height();
+            it.filled_rectangle(0, 0, w, h, id(ma_bg));
+            it.filled_rectangle(12, h / 2 - 42, w - 24, 84, id(ma_panel));
+            it.rectangle(12, h / 2 - 42, w - 24, 84, id(ma_accent));
+            it.printf(w / 2, h / 2, id(ma_font_heading), id(ma_text),
+                      TextAlign::CENTER, "%s", id(preset_message).c_str());
+        - id: musicP
+          lambda: |-
+            const int w = it.get_width();
+            const int h = it.get_height();
+            auto valid = [](const std::string &s) -> bool {
+              return !s.empty() && s != "unknown" && s != "unavailable" && s != "None";
+            };
+            auto text_width = [&](display::BaseFont *font, const std::string &text) -> int {
+              int x1, y1, width, height;
+              it.get_text_bounds(0, 0, text.c_str(), font, TextAlign::TOP_LEFT,
+                                 &x1, &y1, &width, &height);
+              return width;
+            };
+            auto fit_text = [&](display::BaseFont *font, std::string text, int width) -> std::string {
+              if (text_width(font, text) <= width) return text;
+              // Shorten by whole UTF-8 characters so accented names remain valid.
+              while (!text.empty()) {
+                size_t end = text.size() - 1;
+                while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
+                text.resize(end);
+                if (text_width(font, text + "...") <= width) return text + "...";
+              }
+              return "";
+            };
+
+            const std::string title = valid(id(ma_media_title).state) ? id(ma_media_title).state : "";
+            const std::string artist = valid(id(ma_media_artist).state) ? id(ma_media_artist).state : "";
+            const std::string album = valid(id(ma_media_album).state) ? id(ma_media_album).state : "";
+            const float duration_ms = id(ma_media_duration).state;
+            // As in RadioMusic, streams without a finite duration are treated as radio.
+            const bool is_radio = !std::isfinite(duration_ms) || duration_ms <= 500.0f;
+            std::string header = "MUSIC ASSISTANT";
+            std::string main_text;
+            std::string subtitle;
+            std::string detail;
+            if (is_radio) {
+              main_text = album.empty() ? title : album;
+              subtitle = album.empty() || title == album ? "" : title;
+              detail = artist;
+            } else {
+              header = album.empty() ? header : album;
+              main_text = artist.empty() ? title : artist;
+              subtitle = artist.empty() ? "" : title;
+              const int seconds = int(duration_ms / 1000.0f + 0.5f);
+              char duration[24];
+              snprintf(duration, sizeof(duration), "%d:%02d", seconds / 60, seconds % 60);
+              detail = duration;
+            }
+            display::BaseFont *main_font = id(ma_font_station);
+            if (text_width(main_font, main_text) > w - 48) main_font = id(ma_font_heading);
+            main_text = fit_text(main_font, main_text, w - 48);
+            header = fit_text(id(ma_font_heading), header, w - 32);
+            subtitle = fit_text(id(ma_font_metadata), subtitle, w - 48);
+            detail = fit_text(id(ma_font_status), detail, w - 48);
+
+            // Event-driven full redraw: clear absent metadata without a scrolling timer.
+            it.filled_rectangle(0, 0, w, h, id(ma_bg));
+            it.filled_rectangle(0, 0, w, 50, id(ma_header));
+            it.filled_rectangle(0, 50, w, 3, id(ma_accent));
+            it.filled_rectangle(12, 66, w - 24, 110, id(ma_panel));
+            it.rectangle(12, 66, w - 24, 110, id(ma_accent));
+            it.filled_rectangle(12, h - 50, w - 24, 40, id(ma_footer));
+            it.printf(w / 2, 13, id(ma_font_heading), id(ma_text), TextAlign::TOP_CENTER,
+                      "%s", header.c_str());
+            it.printf(w / 2, 79, main_font, id(ma_text), TextAlign::TOP_CENTER,
+                      "%s", main_text.c_str());
+            it.printf(w / 2, 117, id(ma_font_metadata), id(ma_text_muted), TextAlign::TOP_CENTER,
+                      "%s", subtitle.c_str());
+            it.printf(w / 2, 146, id(ma_font_status), id(ma_text_muted), TextAlign::TOP_CENTER,
+                      "%s", detail.c_str());
+
+            const bool muted = id(sendspin_media_player).is_muted();
+            const float volume = id(sendspin_media_player).volume;
+            const bool volume_known = std::isfinite(volume);
+            const int volume_percent = volume_known ? int(clamp(volume, 0.0f, 1.0f) * 100 + 0.5f) : 0;
+            if (muted) {
+              it.print(24, h - 43, id(ma_font_status), id(ma_accent), "MUTED");
+            } else if (volume_known) {
+              it.printf(24, h - 43, id(ma_font_status), id(ma_text), "VOL %d%%", volume_percent);
+            } else {
+              it.print(24, h - 43, id(ma_font_status), id(ma_text_muted), "VOL --");
+            }
+            const int bar_x = 106;
+            const int bar_w = w - 190;
+            it.filled_rectangle(bar_x, h - 37, bar_w, 8, id(ma_bar_bg));
+            const int filled = muted ? 0 : bar_w * volume_percent / 100;
+            if (filled > 0) it.filled_rectangle(bar_x, h - 37, filled, 8, id(ma_bar_fill));
+            if (id(usb_power_detect).state) {
+              it.print(bar_x + bar_w / 2, h - 23, id(font_wifi_label), id(ma_text_muted),
+                       TextAlign::TOP_CENTER, "USB");
+            }
+
+            const int battery_x = w - 57;
+            const int battery_y = h - 43;
+            it.rectangle(battery_x, battery_y, 30, 12, id(ma_text));
+            it.filled_rectangle(battery_x + 30, battery_y + 4, 3, 4, id(ma_text));
+            it.filled_rectangle(battery_x + 2, battery_y + 2, 26, 8, id(ma_bar_bg));
+            const float battery = id(battery_percent).state;
+            if (id(battery_percent).has_state() && std::isfinite(battery)) {
+              const int percent = int(clamp(battery, 0.0f, 100.0f) + 0.5f);
+              const Color battery_color = percent < 20 ? id(ma_battery_low) :
+                  percent < 50 ? id(ma_accent) : id(ma_bar_fill);
+              const int battery_fill = 26 * percent / 100;
+              if (battery_fill > 0) {
+                it.filled_rectangle(battery_x + 2, battery_y + 2, battery_fill, 8, battery_color);
+              }
+              it.printf(battery_x + 15, battery_y + 13, id(ma_font_status), id(ma_text_muted),
+                        TextAlign::TOP_CENTER, "%d%%", percent);
+            } else {
+              it.print(battery_x + 15, battery_y + 13, id(ma_font_status), id(ma_text_muted),
+                       TextAlign::TOP_CENTER, "--%");
+            }
+        - id: logoP
+          lambda: |-
+            it.image(0, 0, id(raspiIm));
+            auto draw_volume_bar = [&]() {
+              if (!id(volume_display_active)) {
+                return;
+              }
+              float display_volume = id(Vol);
+              if (id(mute) || id(auto_mute_active)) {
+                display_volume = 0.0f;
+              }
+              if (display_volume < 0.0f) {
+                display_volume = 0.0f;
+              }
+              if (display_volume > 1.0f) {
+                display_volume = 1.0f;
+              }
+              const int gauge_height = 18;
+              const int margin = 3;
+              const int display_width = it.get_width();
+              const int display_height = it.get_height();
+              if (display_width <= margin * 2 || display_height <= gauge_height) {
+                return;
+              }
+              const int gauge_y = display_height - gauge_height;
+              const int inner_width = display_width - margin * 2;
+              const int inner_height = gauge_height - margin * 2;
+              int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
+              if (filled_width > inner_width) {
+                filled_width = inner_width;
+              } else if (filled_width < 0) {
+                filled_width = 0;
+              }
+              it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
+              if (inner_height > 0) {
+                if (filled_width > 0) {
+                  auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
+                  it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
+                }
+                it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
+              }
+            };
+            draw_volume_bar();
+        - id: wifiWaitingP
+          lambda: |-
+            const int display_width = it.get_width();
+            const int display_height = it.get_height();
+            it.filled_rectangle(0, 0, display_width, display_height, id(bg_blue));
+            it.printf(display_width / 2, display_height / 2 - 12, id(font_request), id(white), TextAlign::CENTER, "Waiting WiFi...");
+            it.printf(display_width / 2, display_height / 2 + 12, id(font_request), id(white), TextAlign::CENTER, "Connecting to network");
+        - id: waitingP
+          lambda: |-
+            it.image(0, 0, id(WFWWIm));
+            auto draw_volume_bar = [&]() {
+              if (!id(volume_display_active)) {
+                return;
+              }
+              float display_volume = id(Vol);
+              if (id(mute) || id(auto_mute_active)) {
+                display_volume = 0.0f;
+              }
+              if (display_volume < 0.0f) {
+                display_volume = 0.0f;
+              }
+              if (display_volume > 1.0f) {
+                display_volume = 1.0f;
+              }
+              const int gauge_height = 18;
+              const int margin = 3;
+              const int display_width = it.get_width();
+              const int display_height = it.get_height();
+              if (display_width <= margin * 2 || display_height <= gauge_height) {
+                return;
+              }
+              const int gauge_y = display_height - gauge_height;
+              const int inner_width = display_width - margin * 2;
+              const int inner_height = gauge_height - margin * 2;
+              int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
+              if (filled_width > inner_width) {
+                filled_width = inner_width;
+              } else if (filled_width < 0) {
+                filled_width = 0;
+              }
+              it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
+              if (inner_height > 0) {
+                if (filled_width > 0) {
+                  auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
+                  it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
+                }
+                it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
+              }
+            };
+            auto draw_battery_icon = [&]() {
+              const int margin = 4;
+              const int icon_width = 34;
+              const int icon_height = 14;
+              const int cap_width = 4;
+              const int vertical_offset = 2;
+              const int display_width = it.get_width();
+              auto draw_charging_indicator = [&](int center_x, int center_y) {
+                const int x = display_width - icon_width - cap_width - margin;
+                const int y = margin + vertical_offset;
+                it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                
+                const int bolt_width = 24;
+                const int bolt_height = 8;
+                const int left = center_x - bolt_width / 2;
+                const int top = center_y - bolt_height / 2 - 1;
+                it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+                it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+              };
+              if (display_width <= icon_width + cap_width + margin * 2) {
+                return;
+              }
+              const int x = display_width - icon_width - cap_width - margin;
+              const int y = margin + vertical_offset;
+              const int cap_height = icon_height / 2;
+              it.rectangle(x, y, icon_width, icon_height, id(black));
+              it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
+              const int inner_width = icon_width - 4;
+              const int inner_height = icon_height - 4;
+              it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
+              if (!id(battery_percent).has_state()) {
+                return;
+              }
+              const bool is_charging = id(usb_power_detect).state;
+              float percent = id(battery_percent).state;
+              if (percent < 0.0f) {
+                percent = 0.0f;
+              }
+              if (percent > 100.0f) {
+                percent = 100.0f;
+              }
+              auto level_color = id(lime);
+              if (percent < 20.0f) {
+                level_color = id(red);
+              } else if (percent < 50.0f) {
+                level_color = id(amber);
+              }
+              int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
+              if (fill_width > inner_width) {
+                fill_width = inner_width;
+              } else if (fill_width < 0) {
+                fill_width = 0;
+              }
+              if (fill_width > 0) {
+                it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
+              }
+              const int center_x = x + icon_width / 2;
+              const int center_y = y + icon_height / 2 + 1;
+              if (is_charging) {
+                draw_charging_indicator(center_x, center_y);
+              } else {
+                it.printf(center_x, center_y, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
+              }
+            };
+
+            auto draw_wifi_icon = [&]() {
+                const int margin = 4;
+                const int battery_icon_width = 34;
+                const int cap_width = 4;
+                const int battery_icon_height = 14;
+                const int vertical_offset = 2;
+                const int display_width = it.get_width();
+                if (!id(wifi_signal_dbm).has_state()) {
+                  return;
+                }
+                const int x = display_width - battery_icon_width - cap_width - margin;
+                const int y = margin + vertical_offset;
+                const int box_size = 22;
+                const int half_box = box_size / 2;
+                const int wifi_gap = 10;
+                const int center_x = x - wifi_gap - half_box;
+                float rssi = id(wifi_signal_dbm).state;
+                auto level_color = id(red);
+                int bars = 1;
+                if (rssi > -60.0f) {
+                  level_color = id(lime);
+                  bars = 3;
+                } else if (rssi > -75.0f) {
+                  level_color = id(amber);
+                  bars = 2;
+                }
+                const int dot_x = center_x;
+                const int dot_y = y + battery_icon_height - 1;
+                const float pi = 3.14159265f;
+                const float start_deg = 200.0f;
+                const float end_deg = 340.0f;
+                const float step_deg = 5.0f;
+              auto draw_arc = [&](int radius, int thickness) {
+                for (int t = 0; t < thickness; t++) {
+                  const int r = radius - t;
+                  bool has_prev = false;
+                  int prev_x = 0;
+                  int prev_y = 0;
+                  for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
+                    const float rad = deg * pi / 180.0f;
+                    const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
+                    const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
+                    if (has_prev) {
+                      it.line(prev_x, prev_y, px, py, level_color);
+                    }
+                    prev_x = px;
+                    prev_y = py;
+                    has_prev = true;
+                  }
+                }
+              };
+
+              it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
+              if (bars >= 1) {
+                draw_arc(4, 2);
+              }
+              if (bars >= 2) {
+                draw_arc(7, 2);
+              }
+              if (bars >= 3) {
+                draw_arc(10, 2);
+              }
+            };
+
+            draw_volume_bar();
+            draw_battery_icon();
+            draw_wifi_icon();
+        - id: waitingBP
+          lambda: |-
+            it.image(0, 0, id(WIm));
+            auto draw_volume_bar = [&]() {
+              if (!id(volume_display_active)) {
+                return;
+              }
+              float display_volume = id(Vol);
+              if (id(mute) || id(auto_mute_active)) {
+                display_volume = 0.0f;
+              }
+              if (display_volume < 0.0f) {
+                display_volume = 0.0f;
+              }
+              if (display_volume > 1.0f) {
+                display_volume = 1.0f;
+              }
+              const int gauge_height = 18;
+              const int margin = 3;
+              const int display_width = it.get_width();
+              const int display_height = it.get_height();
+              if (display_width <= margin * 2 || display_height <= gauge_height) {
+                return;
+              }
+              const int gauge_y = display_height - gauge_height;
+              const int inner_width = display_width - margin * 2;
+              const int inner_height = gauge_height - margin * 2;
+              int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
+              if (filled_width > inner_width) {
+                filled_width = inner_width;
+              } else if (filled_width < 0) {
+                filled_width = 0;
+              }
+              it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
+              if (inner_height > 0) {
+                if (filled_width > 0) {
+                  auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
+                  it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
+                }
+                it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
+              }
+            };
+            auto draw_battery_icon = [&]() {
+              const int margin = 4;
+              const int icon_width = 34;
+              const int icon_height = 14;
+              const int cap_width = 4;
+              const int vertical_offset = 2;
+              const int display_width = it.get_width();
+              auto draw_charging_indicator = [&](int center_x, int center_y) {
+              const int x = display_width - icon_width - cap_width - margin;
+              const int y = margin + vertical_offset;
+              it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                            
+                const int bolt_width = 24;
+                const int bolt_height = 8;
+                const int left = center_x - bolt_width / 2;
+                const int top = center_y - bolt_height / 2 - 1;
+                it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+                it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+              };
+              if (display_width <= icon_width + cap_width + margin * 2) {
+                return;
+              }
+              const int x = display_width - icon_width - cap_width - margin;
+              const int y = margin + vertical_offset;
+              const int cap_height = icon_height / 2;
+              it.rectangle(x, y, icon_width, icon_height, id(black));
+              it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
+              const int inner_width = icon_width - 4;
+              const int inner_height = icon_height - 4;
+              it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
+              if (!id(battery_percent).has_state()) {
+                return;
+              }
+              const bool is_charging = id(usb_power_detect).state;
+              float percent = id(battery_percent).state;
+              if (percent < 0.0f) {
+                percent = 0.0f;
+              }
+              if (percent > 100.0f) {
+                percent = 100.0f;
+              }
+              auto level_color = id(lime);
+              if (percent < 20.0f) {
+                level_color = id(red);
+              } else if (percent < 50.0f) {
+                level_color = id(amber);
+              }
+              int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
+              if (fill_width > inner_width) {
+                fill_width = inner_width;
+              } else if (fill_width < 0) {
+                fill_width = 0;
+              }
+              if (fill_width > 0) {
+                it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
+              }
+              const int center_x = x + icon_width / 2;
+              const int center_y = y + icon_height / 2 + 1;           
+              if (is_charging) {
+                draw_charging_indicator(center_x, center_y);
+              } else {
+                it.printf(center_x, center_y, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
+              }
+            };
+
+            auto draw_wifi_icon = [&]() {
+              const int margin = 4;
+              const int battery_icon_width = 34;
+              const int cap_width = 4;
+              const int battery_icon_height = 14;
+              const int vertical_offset = 2;
+              const int display_width = it.get_width();
+              if (!id(wifi_signal_dbm).has_state()) {
+                return;
+              }
+              const int x = display_width - battery_icon_width - cap_width - margin;
+              const int y = margin + vertical_offset;
+              const int box_size = 22;
+              const int half_box = box_size / 2;
+              const int wifi_gap = 10;
+              const int center_x = x - wifi_gap - half_box;
+              float rssi = id(wifi_signal_dbm).state;
+              auto level_color = id(red);
+              int bars = 1;
+                if (rssi > -60.0f) {
+                  level_color = id(lime);
+                  bars = 3;
+                } else if (rssi > -75.0f) {
+                  level_color = id(amber);
+                  bars = 2;
+                }
+                const int dot_x = center_x;
+                const int dot_y = y + battery_icon_height - 1;
+                const float pi = 3.14159265f;
+                const float start_deg = 200.0f;
+                const float end_deg = 340.0f;
+                const float step_deg = 5.0f;
+              auto draw_arc = [&](int radius, int thickness) {
+                for (int t = 0; t < thickness; t++) {
+                  const int r = radius - t;
+                  bool has_prev = false;
+                  int prev_x = 0;
+                  int prev_y = 0;
+                  for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
+                    const float rad = deg * pi / 180.0f;
+                    const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
+                    const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
+                    if (has_prev) {
+                      it.line(prev_x, prev_y, px, py, level_color);
+                    }
+                    prev_x = px;
+                    prev_y = py;
+                    has_prev = true;
+                  }
+                }
+              };
+
+              it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
+              if (bars >= 1) {
+                draw_arc(4, 2);
+              }
+              if (bars >= 2) {
+                draw_arc(7, 2);
+              }
+              if (bars >= 3) {
+                draw_arc(10, 2);
+              }
+            };
+
+            
+            auto draw_speaker_icon = [&]() {
+              const int margin = 4;
+              const int icon_width = 20;
+              const int icon_height = 20;
+              const int vertical_offset = 2;
+              const int horizontal_offset = 4;
+              int t = 1;
+              if (it.get_width() <= icon_width + margin * 2) {
+                return;
+              }
+              const int x = margin + horizontal_offset;
+              const int y = margin + vertical_offset;
+              const bool is_muted = id(mute) && !id(auto_mute_active);
+              auto symbol_color = is_muted ? id(red) : id(green);
+
+              it.rectangle(x-t, y+icon_height/4-t, icon_width, icon_height/2+t+t, id(black));
+              it.triangle(x, y+icon_height/2, x+icon_width+t, y-t, x+icon_width+t, y+icon_height+t,id(black));   
+              t = 2;      
+              it.rectangle(x-t, y+icon_height/4-t, icon_width, icon_height/2+t+t, id(black));
+              it.triangle(x, y+icon_height/2, x+icon_width+t, y-t, x+icon_width+t, y+icon_height+t,id(black));                     
+              it.filled_rectangle(x, y+icon_height/4, icon_width, icon_height/2, symbol_color);
+              it.filled_triangle(x, y+icon_height/2, x+icon_width, y, x+icon_width, y+icon_height,symbol_color); 
+              it.line(x+icon_width/2, y+icon_height/4, x+icon_width/2, y+icon_height*3/4, id(black));
+            };            
+            
+            draw_volume_bar();
+            draw_speaker_icon();
+            draw_battery_icon();
+            draw_wifi_icon();           
+        - id: listeningP
+          lambda: |-
+              it.image(0, 0, id(LIm));
+              auto draw_volume_bar = [&]() {
+                if (!id(volume_display_active)) {
+                  return;
+                }
+                float display_volume = id(Vol);
+                if (id(mute) || id(auto_mute_active)) {
+                  display_volume = 0.0f;
+                }
+                if (display_volume < 0.0f) {
+                  display_volume = 0.0f;
+                }
+                if (display_volume > 1.0f) {
+                  display_volume = 1.0f;
+                }
+                const int gauge_height = 18;
+                const int margin = 3;
+                const int display_width = it.get_width();
+                const int display_height = it.get_height();
+                if (display_width <= margin * 2 || display_height <= gauge_height) {
+                  return;
+                }
+                const int gauge_y = display_height - gauge_height;
+                const int inner_width = display_width - margin * 2;
+                const int inner_height = gauge_height - margin * 2;
+                int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
+                if (filled_width > inner_width) {
+                  filled_width = inner_width;
+                } else if (filled_width < 0) {
+                  filled_width = 0;
+                }
+                it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
+                if (inner_height > 0) {
+                  if (filled_width > 0) {
+                    auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
+                    it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
+                  }
+                  it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
+                }
+              };
+              auto draw_battery_icon = [&]() {
+                const int margin = 4;
+                const int icon_width = 34;
+                const int icon_height = 14;
+                const int cap_width = 4;
+                const int vertical_offset = 2;
+                const int display_width = it.get_width();
+                auto draw_charging_indicator = [&](int center_x, int center_y) {
+                  const int x = display_width - icon_width - cap_width - margin;
+                  const int y = margin + vertical_offset;
+                  it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                  
+                  const int bolt_width = 24;
+                  const int bolt_height = 8;
+                  const int left = center_x - bolt_width / 2;
+                  const int top = center_y - bolt_height / 2 - 1;                
+                  it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+                  it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+                };
+                if (display_width <= icon_width + cap_width + margin * 2) {
+                  return;
+                }
+                const int x = display_width - icon_width - cap_width - margin;
+                const int y = margin + vertical_offset;
+                const int cap_height = icon_height / 2;
+                it.rectangle(x, y, icon_width, icon_height, id(black));
+                it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
+                const int inner_width = icon_width - 4;
+                const int inner_height = icon_height - 4;
+                it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
+                if (!id(battery_percent).has_state()) {
+                  return;
+                }
+                const bool is_charging = id(usb_power_detect).state;
+                float percent = id(battery_percent).state;
+                if (percent < 0.0f) {
+                  percent = 0.0f;
+                }
+                if (percent > 100.0f) {
+                  percent = 100.0f;
+                }
+                auto level_color = id(lime);
+                if (percent < 20.0f) {
+                  level_color = id(red);
+                } else if (percent < 50.0f) {
+                  level_color = id(amber);
+                }
+                int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
+                if (fill_width > inner_width) {
+                  fill_width = inner_width;
+                } else if (fill_width < 0) {
+                  fill_width = 0;
+                }
+                if (fill_width > 0) {
+                  it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
+                }
+                const int center_x = x + icon_width / 2;
+                const int center_y = y + icon_height / 2 + 1;
+                if (is_charging) {
+                  draw_charging_indicator(center_x, center_y);
+                } else {
+                  it.printf(center_x, center_y, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
+                }
+              };
+
+              auto draw_wifi_icon = [&]() {
+                const int margin = 4;
+                const int battery_icon_width = 34;
+                const int cap_width = 4;
+                const int battery_icon_height = 14;
+                const int vertical_offset = 2;
+                const int display_width = it.get_width();
+                if (!id(wifi_signal_dbm).has_state()) {
+                  return;
+                }
+                const int x = display_width - battery_icon_width - cap_width - margin;
+                const int y = margin + vertical_offset;
+                const int box_size = 22;
+                const int half_box = box_size / 2;
+                const int wifi_gap = 10;
+                const int center_x = x - wifi_gap - half_box;
+                float rssi = id(wifi_signal_dbm).state;
+                auto level_color = id(red);
+                int bars = 1;
+                  if (rssi > -60.0f) {
+                    level_color = id(lime);
+                    bars = 3;
+                  } else if (rssi > -75.0f) {
+                    level_color = id(amber);
+                    bars = 2;
+                  }
+                  const int dot_x = center_x;
+                  const int dot_y = y + battery_icon_height - 1;
+                  const float pi = 3.14159265f;
+                  const float start_deg = 200.0f;
+                  const float end_deg = 340.0f;
+                  const float step_deg = 5.0f;
+                auto draw_arc = [&](int radius, int thickness) {
+                  for (int t = 0; t < thickness; t++) {
+                    const int r = radius - t;
+                    bool has_prev = false;
+                    int prev_x = 0;
+                    int prev_y = 0;
+                    for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
+                      const float rad = deg * pi / 180.0f;
+                      const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
+                      const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
+                      if (has_prev) {
+                        it.line(prev_x, prev_y, px, py, level_color);
+                      }
+                      prev_x = px;
+                      prev_y = py;
+                      has_prev = true;
+                    }
+                  }
+                };
+
+                it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
+                if (bars >= 1) {
+                  draw_arc(4, 2);
+                }
+                if (bars >= 2) {
+                  draw_arc(7, 2);
+                }
+                if (bars >= 3) {
+                  draw_arc(10, 2);
+                }
+              };
+
+              draw_volume_bar();
+              draw_battery_icon();
+              draw_wifi_icon();
+        - id: answeringP
+          lambda: |-
+              it.image(0, 0, id(AIm));
+              it.rectangle(20 , 24 , 280 , 30 , Color::BLACK );
+              it.printf(30, 25, id(font_request), Color::BLACK, "%s", id(text_request).state.c_str());
+              it.rectangle(20 , 190 , 280 , 30 , Color::BLACK );
+              it.printf(30, 195, id(font_response), Color::BLACK, "%s", id(text_response).state.c_str());
+              auto draw_volume_bar = [&]() {
+                if (!id(volume_display_active)) {
+                  return;
+                }
+                float display_volume = id(Vol);
+                if (id(mute) || id(auto_mute_active)) {
+                  display_volume = 0.0f;
+                }
+                if (display_volume < 0.0f) {
+                  display_volume = 0.0f;
+                }
+                if (display_volume > 1.0f) {
+                  display_volume = 1.0f;
+                }
+                const int gauge_height = 18;
+                const int margin = 3;
+                const int display_width = it.get_width();
+                const int display_height = it.get_height();
+                if (display_width <= margin * 2 || display_height <= gauge_height) {
+                  return;
+                }
+                const int gauge_y = display_height - gauge_height;
+                const int inner_width = display_width - margin * 2;
+                const int inner_height = gauge_height - margin * 2;
+                int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
+                if (filled_width > inner_width) {
+                  filled_width = inner_width;
+                } else if (filled_width < 0) {
+                  filled_width = 0;
+                }
+                it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
+                if (inner_height > 0) {
+                  if (filled_width > 0) {
+                    auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
+                    it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
+                  }
+                  it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
+                }
+              };
+              auto draw_battery_icon = [&]() {
+                const int margin = 4;
+                const int icon_width = 34;
+                const int icon_height = 14;
+                const int cap_width = 4;
+                const int vertical_offset = 2;
+                const int display_width = it.get_width();
+                auto draw_charging_indicator = [&](int center_x, int center_y) {
+                  const int x = display_width - icon_width - cap_width - margin;
+                  const int y = margin + vertical_offset;
+                  it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                  
+                  const int bolt_width = 24;
+                  const int bolt_height = 8;
+                  const int left = center_x - bolt_width / 2;
+                  const int top = center_y - bolt_height / 2 - 1;                  
+                  it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+                  it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+                };
+                if (display_width <= icon_width + cap_width + margin * 2) {
+                  return;
+                }
+                const int x = display_width - icon_width - cap_width - margin;
+                const int y = margin + vertical_offset;
+                const int cap_height = icon_height / 2;
+                it.rectangle(x, y, icon_width, icon_height, id(black));
+                it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
+                const int inner_width = icon_width - 4;
+                const int inner_height = icon_height - 4;
+                it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
+                if (!id(battery_percent).has_state()) {
+                  return;
+                }
+                const bool is_charging = id(usb_power_detect).state;
+                float percent = id(battery_percent).state;
+                if (percent < 0.0f) {
+                  percent = 0.0f;
+                }
+                if (percent > 100.0f) {
+                  percent = 100.0f;
+                }
+                auto level_color = id(lime);
+                if (percent < 20.0f) {
+                  level_color = id(red);
+                } else if (percent < 50.0f) {
+                  level_color = id(amber);
+                }
+                int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
+                if (fill_width > inner_width) {
+                  fill_width = inner_width;
+                } else if (fill_width < 0) {
+                  fill_width = 0;
+                } 
+                if (fill_width > 0) {
+                  it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
+                }
+                const int center_x = x + icon_width / 2;
+                const int center_y = y + icon_height / 2 + 1;
+                if (is_charging) {
+                  draw_charging_indicator(center_x, center_y);
+                } else {
+                  it.printf(center_x, center_y, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
+                }
+              };            
+              auto draw_wifi_icon = [&]() {
+                const int margin = 4;
+                const int battery_icon_width = 34;
+                const int cap_width = 4;
+                const int battery_icon_height = 14;
+                const int vertical_offset = 2;
+                const int display_width = it.get_width();
+                if (!id(wifi_signal_dbm).has_state()) {
+                  return;
+                }
+                const int x = display_width - battery_icon_width - cap_width - margin;
+                const int y = margin + vertical_offset;
+                const int box_size = 22;
+                const int half_box = box_size / 2;
+                const int wifi_gap = 10;
+                const int center_x = x - wifi_gap - half_box;
+                float rssi = id(wifi_signal_dbm).state;
+                auto level_color = id(red);
+                int bars = 1;
+                  if (rssi > -60.0f) {
+                    level_color = id(lime);
+                    bars = 3;
+                  } else if (rssi > -75.0f) {
+                    level_color = id(amber);
+                    bars = 2;
+                  }
+                  const int dot_x = center_x;
+                  const int dot_y = y + battery_icon_height - 1;
+                  const float pi = 3.14159265f;
+                  const float start_deg = 200.0f;
+                  const float end_deg = 340.0f;
+                  const float step_deg = 5.0f;
+                auto draw_arc = [&](int radius, int thickness) {
+                  for (int t = 0; t < thickness; t++) {
+                    const int r = radius - t;
+                    bool has_prev = false;
+                    int prev_x = 0;
+                    int prev_y = 0;
+                    for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
+                      const float rad = deg * pi / 180.0f;
+                      const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
+                      const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
+                      if (has_prev) {
+                        it.line(prev_x, prev_y, px, py, level_color);
+                      }
+                      prev_x = px;
+                      prev_y = py;
+                      has_prev = true;
+                    }
+                  }
+                };
+
+                it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
+                if (bars >= 1) {
+                  draw_arc(4, 2);
+                }
+                if (bars >= 2) {
+                  draw_arc(7, 2);
+                }
+                if (bars >= 3) {
+                  draw_arc(10, 2);
+                }
+              };            
+              draw_volume_bar();
+              draw_battery_icon();
+              draw_wifi_icon();
+        - id: muteMicP
+          lambda: |-
+            it.image(0, 0, id(muteMicIm));
+            auto draw_volume_bar = [&]() {
+              if (!id(volume_display_active)) {
+                return;
+              }
+              float display_volume = id(Vol);
+              if (id(mute) || id(auto_mute_active)) {
+                display_volume = 0.0f;
+              }
+              if (display_volume < 0.0f) {
+                display_volume = 0.0f;
+              }
+              if (display_volume > 1.0f) {
+                display_volume = 1.0f;
+              }
+              const int gauge_height = 18;
+              const int margin = 3;
+              const int display_width = it.get_width();
+              const int display_height = it.get_height();
+              if (display_width <= margin * 2 || display_height <= gauge_height) {
+                return;
+              }
+              const int gauge_y = display_height - gauge_height;
+              const int inner_width = display_width - margin * 2;
+              const int inner_height = gauge_height - margin * 2;
+              int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
+              if (filled_width > inner_width) {
+                filled_width = inner_width;
+              } else if (filled_width < 0) {
+                filled_width = 0;
+              }
+              it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
+              if (inner_height > 0) {
+                if (filled_width > 0) {
+                  auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
+                  it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
+                }
+                it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
+              }
+            };
+            auto draw_battery_icon = [&]() {
+              const int margin = 2;
+              const int icon_width = 30;
+              const int icon_height = 10;
+              const int cap_width = 4;
+              const int vertical_offset = 2;
+              const int display_width = it.get_width();
+              auto draw_charging_indicator = [&](int center_x, int center_y) {
+                const int x = display_width - icon_width - cap_width - margin;
+                const int y = margin + vertical_offset;
+                it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                
+                const int bolt_width = 24;
+                const int bolt_height = 8;
+                const int left = center_x - bolt_width / 2;
+                const int top = center_y - bolt_height / 2 - 1;
+                it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+                it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
+              };
+              if (display_width <= icon_width + cap_width + margin * 2) {
+                return;
+              }
+              const int x = display_width - icon_width - cap_width - margin;
+              const int y = margin + vertical_offset;
+              const int cap_height = icon_height / 2;
+              it.rectangle(x, y, icon_width, icon_height, id(black));
+              it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
+              const int inner_width = icon_width - 4;
+              const int inner_height = icon_height - 4;
+              it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
+              if (!id(battery_percent).has_state()) {
+                return;
+              }
+              const bool is_charging = id(usb_power_detect).state;
+              float percent = id(battery_percent).state;
+              if (percent < 0.0f) {
+                percent = 0.0f;
+              }
+              if (percent > 100.0f) {
+                percent = 100.0f;
+              }
+              auto level_color = id(lime);
+              if (percent < 20.0f) {
+                level_color = id(red);
+              } else if (percent < 50.0f) {
+                level_color = id(amber);
+              }
+              int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
+              if (fill_width > inner_width) {
+                fill_width = inner_width;
+              } else if (fill_width < 0) {
+                fill_width = 0;
+              }
+              if (fill_width > 0) {
+                it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
+              }
+              const int center_x = x + icon_width / 2;
+              const int center_y = y + icon_height / 2;
+              if (is_charging) {
+                draw_charging_indicator(center_x, center_y);
+              } else {
+                it.printf(center_x, center_y + 1, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
+              }
+            };
+
+            draw_volume_bar();
+            draw_battery_icon();
+            auto draw_wifi_icon = [&]() {
+              const int margin = 2;
+              const int battery_icon_width = 30;
+              const int cap_width = 4;
+              const int battery_icon_height = 10;
+              const int vertical_offset = 2;
+              const int display_width = it.get_width();
+              if (!id(wifi_signal_dbm).has_state()) {
+                return;
+              }
+              const int x = display_width - battery_icon_width - cap_width - margin;
+              const int y = margin + vertical_offset;
+              const int box_size = 22;
+              const int half_box = box_size / 2;
+              const int wifi_gap = 10;
+              const int center_x = x - wifi_gap - half_box;
+              float rssi = id(wifi_signal_dbm).state;
+              auto level_color = id(red);
+              int bars = 1;
+              if (rssi > -60.0f) {
+                level_color = id(lime);
+                bars = 3;
+                } else if (rssi > -75.0f) {
+                  level_color = id(amber);
+                  bars = 2;
+                }
+                const int dot_x = center_x;
+                const int dot_y = y + battery_icon_height - 1;
+                const float pi = 3.14159265f;
+                const float start_deg = 200.0f;
+                const float end_deg = 340.0f;
+                const float step_deg = 5.0f;
+              auto draw_arc = [&](int radius, int thickness) {
+                for (int t = 0; t < thickness; t++) {
+                  const int r = radius - t;
+                  bool has_prev = false;
+                  int prev_x = 0;
+                  int prev_y = 0;
+                  for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
+                    const float rad = deg * pi / 180.0f;
+                    const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
+                    const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
+                    if (has_prev) {
+                      it.line(prev_x, prev_y, px, py, level_color);
+                    }
+                    prev_x = px;
+                    prev_y = py;
+                    has_prev = true;
+                  }
+                }
+              };
+
+              it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
+              if (bars >= 1) {
+                draw_arc(4, 2);
+              }
+              if (bars >= 2) {
+                draw_arc(7, 2);
+              }
+              if (bars >= 3) {
+                draw_arc(10, 2);
+              }
+            };
+            draw_wifi_icon();
+
+
+
+# Home Assistant Components
+sensor:
+  - platform: sendspin
+    id: ma_media_duration
+    type: track_duration
+    internal: true
+    on_value:
+      - script.execute: schedule_music_refresh
+  - platform: rotary_encoder
+    name: "Volume"
+    id: volume_encoder
+    pin_a:
+      number: GPIO42
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO3
+      mode:
+        input: true
+        pullup: true
+    on_anticlockwise:
+      then:
+#        - delay: 400ms
+        - script.execute:
+            id: adjust_volume
+            delta: -0.05
+    on_clockwise:
+      then:
+#        - delay: 400ms
+        - script.execute:
+            id: adjust_volume
+            delta: 0.05
+  - platform: rotary_encoder
+    name: "Dummy"
+    id: function_encoder
+    pin_a:
+      number: GPIO7
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO6
+      mode:
+        input: true
+        pullup: true
+    on_anticlockwise:
+      then:
+        - light.turn_on: screen_backlight
+        - lambda: |-
+                id(lightTO) = 0;
+
+    on_clockwise:
+      then:
+        - light.turn_on: screen_backlight
+        - lambda: |-
+                id(lightTO) = 0;
+  - platform: adc
+    id: button_adc
+    pin: GPIO1
+    attenuation: auto
+    update_interval: .1s
+    on_value_range:
+      - above: 3.0
+        then:
+          - binary_sensor.template.publish:
+              id: btn_confirm
+              state: OFF
+          - binary_sensor.template.publish:
+              id: btn_1
+              state: OFF
+          - binary_sensor.template.publish:
+              id: btn_2
+              state: OFF
+          - binary_sensor.template.publish:
+              id: btn_3
+              state: OFF
+      - above: 0.41
+        below: 0.45
+        then:
+          - binary_sensor.template.publish:
+              id: btn_3
+              state: ON
+      - above: 0.8
+        below: 0.84
+        then:
+          - binary_sensor.template.publish:
+              id: btn_confirm
+              state: ON
+      - above: 1.50
+        below: 1.61
+        then:
+          - binary_sensor.template.publish:
+              id: btn_1
+              state: ON
+      - above: 1.98
+        below: 2.03
+        then:
+          - binary_sensor.template.publish:
+              id: btn_2
+              state: ON
+  - platform: adc
+    pin: GPIO13
+    name: Battery voltage
+    device_class: voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 15s
+    attenuation: auto
+    filters:
+      - multiply: 2
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          # Map measured full charge to real value to compensate divider/ADC bias
+          - 4.58 -> 4.20
+      - exponential_moving_average:
+             alpha: 0.2
+             send_every: 2
+      - delta: 0.002
+    on_value:
+        then:
+          - sensor.template.publish:
+              id: battery_percent
+              state: !lambda "return x ;"
+          - lambda: |-
+              if (id(myDisplay).is_ready()) {
+                id(myDisplay).update();
+              }
+  - platform: template
+    name: Battery
+    id: battery_percent
+    device_class: battery
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 15s
+    filters:
+      - calibrate_polynomial:
+           degree: 3
+           datapoints:
+               - 4.20 -> 100.0
+               - 4.13 -> 97.1
+               - 4.10 -> 94.2
+               - 4.07 -> 88.4
+               - 4.05 -> 82.7
+               - 4.04 -> 76.9
+               - 4.04 -> 71.1
+               - 4.01 -> 65.3
+               - 3.99 -> 59.5
+               - 3.95 -> 53.8
+               - 3.93 -> 48.0
+               - 3.91 -> 42.2
+               - 3.88 -> 36.4
+               - 3.86 -> 30.6
+               - 3.84 -> 24.9
+               - 3.82 -> 19.1
+               - 3.76 -> 13.3
+               - 3.73 -> 10.4
+               - 3.70 -> 7.5
+               - 3.64 -> 4.6
+               - 3.50 -> 1.7
+               - 3.00 -> 0.0
+      - lambda: return clamp(x, 0.0f, 100.0f);   
+  - platform: wifi_signal
+    name: WiFi Signal
+    id: wifi_signal_dbm
+    update_interval: 15s
+    on_value:
+      then:
+        - lambda: |-
+            if (id(myDisplay).is_ready()) {
+              id(myDisplay).update();
+            }
+
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO21
+      mode:
+        input: true
+#        pullup: true
+    id: usb_power_detect
+    name: USB Power
+    device_class: power
+    entity_category: diagnostic
+    on_press:
+      - logger.log: "USB power detected"
+      - lambda: |-
+          if (id(myDisplay).is_ready()) {
+            id(myDisplay).update();
+          }
+    on_release:
+      - logger.log: "USB power removed"
+      - lambda: |-
+          if (id(myDisplay).is_ready()) {
+            id(myDisplay).update();
+          }
+  - platform: gpio
+    pin:
+      number: GPIO10
+      mode:
+        input: true
+        pullup: true
+    id: jack_detect
+    name: Jack Detect
+    internal: true
+    on_press:
+      - script.execute: jack_detect_high
+    on_release:
+      - script.execute: jack_detect_low
+  - platform: gpio
+    pin:
+      number: GPIO48
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    id: click_vol
+    name: Mute
+#    disabled_by_default: true
+    on_press:
+      then:
+        - script.execute: mute_unmute
+
+  - platform: gpio
+    pin:
+      number: GPIO45
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    id: click_sta
+    name: Assist
+    on_click:
+       - min_length: 50ms
+         max_length: 2s
+         then:
+          - if:
+              condition:
+                lambda: |-
+                  return id(music_active) || id(assist_return_to_ma) ||
+                      id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING;
+              then:
+                - script.execute: temporary_assist
+              else:
+                - script.execute: go_assist
+
+
+  - platform: template
+    name: "Radio 4"
+    id: btn_confirm
+    filters:
+      - delayed_on_off: 30ms
+    on_click:
+      - min_length: 50ms
+        max_length: 1s
+        then:
+          - script.execute:
+              id: play_radio_preset
+              station: !lambda return id(radio_station_4).state;
+      - min_length: 1800ms
+        max_length: 8s
+        then:
+          - script.execute:
+              id: save_radio_preset
+              preset: 4
+
+
+  - platform: template
+    name: "Radio 1"
+    id: btn_1
+    filters:
+      - delayed_on_off: 30ms
+    on_click:
+      - min_length: 50ms
+        max_length: 1s
+        then:
+          - script.execute:
+              id: play_radio_preset
+              station: !lambda return id(radio_station_1).state;
+      - min_length: 1800ms
+        max_length: 8s
+        then:
+          - script.execute:
+              id: save_radio_preset
+              preset: 1
+
+
+  - platform: template
+    name: "Radio 2"
+    id: btn_2
+    filters:
+      - delayed_on_off: 30ms
+    on_click:
+      - min_length: 50ms
+        max_length: 1s
+        then:
+          - script.execute:
+              id: play_radio_preset
+              station: !lambda return id(radio_station_2).state;
+      - min_length: 1800ms
+        max_length: 8s
+        then:
+          - script.execute:
+              id: save_radio_preset
+              preset: 2
+
+
+  - platform: template
+    name: "Radio 3"
+    id: btn_3
+    filters:
+      - delayed_on_off: 30ms
+    on_click:
+      - min_length: 50ms
+        max_length: 1s
+        then:
+          - script.execute:
+              id: play_radio_preset
+              station: !lambda return id(radio_station_3).state;
+      - min_length: 1800ms
+        max_length: 8s
+        then:
+          - script.execute:
+              id: save_radio_preset
+              preset: 3
+  - platform: remote_receiver
+    name: "IR OK"
+    id: ir_ok
+    nec:
+      address: 0xFE01
+      command: 0xF906
+    filters:
+      - delayed_off: 100ms
+    on_click:
+      - logger.log: "IR OK received"
+  - platform: remote_receiver
+    name: "IR UP"
+    id: ir_up
+    nec:
+      address: 0xFE01
+      command: 0xFA05
+    filters:
+      - delayed_off: 100ms
+    on_press:
+      - logger.log: "IR UP received"
+  - platform: remote_receiver
+    name: "IR DOWN"
+    id: ir_down
+    nec:
+      address: 0xFE01
+      command: 0xFB04
+    filters:
+      - delayed_off: 100ms
+    on_press:
+      - logger.log: "IR DOWN received"
+  - platform: remote_receiver
+    name: "IR RIGHT"
+    id: ir_right
+    nec:
+      address: 0xFE01
+      command: 0xF50A
+    filters:
+      - delayed_off: 100ms
+    on_press:
+      - logger.log: "IR RIGHT received"
+  - platform: remote_receiver
+    name: "IR LEFT"
+    id: ir_left
+    nec:
+      address: 0xFE01
+      command: 0xFD02
+    filters:
+      - delayed_off: 100ms
+    on_press:
+      - logger.log: "IR LEFT received"
+  - platform: remote_receiver
+    name: "IR LIKE"
+    id: ir_like
+    nec:
+      address: 0xFE01
+      command: 0xF40B
+    filters:
+      - delayed_off: 100ms
+    on_press:
+      - logger.log: "IR LIKE received"
+  - platform: remote_receiver
+    name: "IR HOME"
+    id: ir_home
+    nec:
+      address: 0xFE01
+      command: 0xFC03
+    filters:
+      - delayed_off: 100ms
+    on_press:
+      - logger.log: "IR HOME received"
+  - platform: remote_receiver
+    name: "IR BIN"
+    id: ir_bin
+    nec:
+      address: 0xFE01
+      command: 0xBB44
+    filters:
+      - delayed_off: 100ms
+    on_press:
+      - logger.log: "IR BIN received"                  
+switch:
+  - platform: template
+    id: mic_mute_switch
+    name: "Microphone Mute"
+    icon: "mdi:microphone-off"
+    entity_category: config
+    lambda: |-
+      return id(mic_muted);
+    turn_on_action:
+      - microphone.mute: radio_mic
+      - lambda: id(mic_muted) = true;
+      - if:
+          condition:
+            voice_assistant.is_running:
+          then:
+            - voice_assistant.stop:
+      - micro_wake_word.stop:
+      - script.execute: reset_display
+    turn_off_action:
+      - microphone.unmute: radio_mic
+      - lambda: id(mic_muted) = false;
+      - if:
+          condition:
+            lambda: |-
+              return !id(music_active) &&
+                  id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING &&
+                  id(radio_speaker).is_stopped();
+          then:
+            - micro_wake_word.start:
+      - script.execute: reset_display
+
+select:
+  - platform: template
+    name: "Wake word sensitivity"
+    optimistic: true
+    initial_option: Slightly sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      # Sets specific wake word probabilities computed for each particular model
+      # Note probability cutoffs are set as a quantized uint8 value, each comment has the corresponding floating point cutoff
+      # False Accepts per Hour values are tested against all units and channels from the Dinner Party Corpus.
+      # These cutoffs apply only to the specific models included in the firmware: okay_nabu@20241226.3, hey_jarvis@v2, hey_mycroft@v2
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu).set_probability_cutoff(217);    // 0.85 -> 0.000 FAPH on DipCo (Manifest's default)
+          id(hey_jarvis).set_probability_cutoff(247);   // 0.97 -> 0.563 FAPH on DipCo (Manifest's default)
+          id(hey_mycroft).set_probability_cutoff(253);  // 0.99 -> 0.567 FAPH on DipCo
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu).set_probability_cutoff(176);    // 0.69 -> 0.376 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(235);   // 0.92 -> 0.939 FAPH on DipCo
+          id(hey_mycroft).set_probability_cutoff(242);  // 0.95 -> 1.502 FAPH on DipCo (Manifest's default)
+        } else if (x == "Very sensitive") {
+          id(okay_nabu).set_probability_cutoff(143);    // 0.56 -> 0.751 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(212);   // 0.83 -> 1.502 FAPH on DipCo
+          id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH on DipCo
+        }
+
+text_sensor:
+  - platform: sendspin
+    id: ma_media_title
+    type: title
+    internal: true
+    on_value:
+      - script.execute: schedule_music_refresh
+  - platform: sendspin
+    id: ma_media_artist
+    type: artist
+    internal: true
+    on_value:
+      - script.execute: schedule_music_refresh
+  - platform: sendspin
+    id: ma_media_album
+    type: album
+    internal: true
+    on_value:
+      - script.execute: schedule_music_refresh
+  - id: text_request
+    platform: template
+    on_value:
+      lambda: |-
+        if(id(text_request).state.length()>40) {
+          std::string name = id(text_request).state.c_str();
+          std::string truncated = esphome::str_truncate(name.c_str(),39);
+          id(text_request).state = (truncated+"...").c_str();
+        }
+
+  - id: text_response
+    platform: template
+    on_value:
+      lambda: |-
+        if(id(text_response).state.length()>32) {
+          std::string name = id(text_response).state.c_str();
+          std::string truncated = esphome::str_truncate(name.c_str(),31);
+          id(text_response).state = (truncated+"...").c_str();
+        }
+
+text:
+  # Persisted station URIs; users may also edit them in the HA device settings.
+  - platform: template
+    id: radio_station_1
+    name: "Station button 1"
+    icon: mdi:radio
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    min_length: 0
+    max_length: 255
+    mode: text
+  - platform: template
+    id: radio_station_2
+    name: "Station button 2"
+    icon: mdi:radio
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    min_length: 0
+    max_length: 255
+    mode: text
+  - platform: template
+    id: radio_station_3
+    name: "Station button 3"
+    icon: mdi:radio
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    min_length: 0
+    max_length: 255
+    mode: text
+  - platform: template
+    id: radio_station_4
+    name: "Station button 4"
+    icon: mdi:radio
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    min_length: 0
+    max_length: 255
+    mode: text
+
+
+
+
+
+#########
+# Scripts
+
+script:
+  - id: show_preset_feedback
+    mode: restart
+    then:
+      - light.turn_on:
+          id: screen_backlight
+          brightness: 100%
+      - lambda: |-
+          id(lightTO) = 0;
+          if (id(myDisplay).is_ready()) {
+            id(myDisplay).show_page(presetP);
+            id(myDisplay).update();
+          }
+      - delay: 2500ms
+      - script.execute: reset_display
+
+  - id: play_radio_preset
+    mode: restart
+    parameters:
+      station: string
+    then:
+      - if:
+          condition:
+            lambda: return station.find_first_not_of(" \t\r\n") != std::string::npos;
+          then:
+            - homeassistant.action:
+                action: media_player.play_media
+                data:
+                  media_content_type: radio
+                  enqueue: replace
+                data_template:
+                  entity_id: >-
+                    {% set configured = player_entity | trim %}
+                    {% if configured and states(configured) not in ['unknown', 'unavailable']
+                          and state_attr(configured, 'mass_player_type') is not none %}
+                      {{ configured }}
+                    {% else %}
+                      {% set ns = namespace(entity_id='') %}
+                      {% for player in states.media_player %}
+                        {% set label = (player.entity_id ~ ' ' ~ player.name) | lower %}
+                        {% if ns.entity_id == '' and player.attributes.mass_player_type is defined
+                              and 'radio' in label %}
+                          {% set ns.entity_id = player.entity_id %}
+                        {% endif %}
+                      {% endfor %}
+                      {{ ns.entity_id }}
+                    {% endif %}
+                  media_content_id: "{{ station_name }}"
+                variables:
+                  station_name: !lambda return station;
+                  player_entity: !lambda return id(ma_player_entity_id);
+                on_error:
+                  - lambda: |-
+                      id(preset_message) = "PLAY FAILED";
+                      ESP_LOGW("radio_preset", "Unable to play station: %s", error.c_str());
+                  - script.execute: show_preset_feedback
+          else:
+            - lambda: 'id(preset_message) = "NO RADIO";'
+            - script.execute: show_preset_feedback
+
+  - id: save_radio_preset
+    mode: restart
+    parameters:
+      preset: int
+    then:
+      - light.turn_on:
+          id: screen_backlight
+          brightness: 100%
+      # Read the currently playing MA queue to save its exact station URI.
+      - homeassistant.action:
+          action: music_assistant.get_queue
+          data_template:
+            entity_id: >-
+              {% set configured = player_entity | trim %}
+              {% if configured and states(configured) not in ['unknown', 'unavailable']
+                    and state_attr(configured, 'mass_player_type') is not none %}
+                {{ configured }}
+              {% else %}
+                {% set ns = namespace(named='', metadata='') %}
+                {% for player in states.media_player %}
+                  {% if player.attributes.mass_player_type is defined
+                        and player.state not in ['unknown', 'unavailable'] %}
+                    {% set label = (player.entity_id ~ ' ' ~ player.name) | lower %}
+                    {% set same_album = current_album | length > 0
+                          and player.attributes.media_album_name | default('') == current_album %}
+                    {% set same_title = current_title | length > 0
+                          and player.attributes.media_title | default('') == current_title %}
+                    {% if ns.named == '' and 'radio' in label %}
+                      {% set ns.named = player.entity_id %}
+                    {% endif %}
+                    {% if ns.metadata == '' and (same_album or same_title) %}
+                      {% set ns.metadata = player.entity_id %}
+                    {% endif %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.named if ns.named else ns.metadata }}
+              {% endif %}
+          variables:
+            player_entity: !lambda return id(ma_player_entity_id);
+            current_title: !lambda return id(ma_media_title).state;
+            current_album: !lambda return id(ma_media_album).state;
+          capture_response: true
+          response_template: >-
+            {% set entity_id = response.keys() | list | first | default('') %}{% set item = response[entity_id].get('current_item') if entity_id else none %}{% set media_item = item.get('media_item') if item else none %}{% set uri = state_attr(entity_id, 'media_content_id') or (media_item.get('uri', '') if media_item else '') %}{{ entity_id }}|@|{{ uri }}
+          on_success:
+            - lambda: |-
+                const std::string payload = response["response"].as<std::string>();
+                const size_t separator = payload.find("|@|");
+                const std::string entity_id = separator == std::string::npos
+                    ? "" : payload.substr(0, separator);
+                const std::string uri = separator == std::string::npos
+                    ? "" : payload.substr(separator + 3);
+                const bool valid = !entity_id.empty() && !uri.empty() &&
+                                   uri.find("://") != std::string::npos;
+                if (!valid) {
+                  id(preset_message) = "NO RADIO";
+                  ESP_LOGW("radio_preset", "No usable station in MA response: %s", payload.c_str());
+                  return;
+                }
+                if (uri.size() > 255) {
+                  id(preset_message) = "URI TOO LONG";
+                  ESP_LOGW("radio_preset", "Station URI exceeds the 255-byte preset limit");
+                  return;
+                }
+
+                text::Text *target = nullptr;
+                if (preset == 1) target = id(radio_station_1);
+                else if (preset == 2) target = id(radio_station_2);
+                else if (preset == 3) target = id(radio_station_3);
+                else if (preset == 4) target = id(radio_station_4);
+                if (target == nullptr) return;
+
+                id(ma_player_entity_id) = entity_id;
+                auto call = target->make_call();
+                call.set_value(uri);
+                call.perform();
+                id(preset_message) = "MEMO " + std::to_string(preset) + " OK";
+                ESP_LOGI("radio_preset", "Station stored on button %d via %s",
+                         preset, entity_id.c_str());
+            - script.execute: show_preset_feedback
+          on_error:
+            - lambda: |-
+                id(preset_message) = "NO RADIO";
+                ESP_LOGW("radio_preset", "Unable to read MA queue: %s", error.c_str());
+            - script.execute: show_preset_feedback
+
+  - id: schedule_music_refresh
+    mode: restart
+    then:
+      - delay: 200ms
+      - if:
+          condition:
+            lambda: 'return id(music_active) && !id(assist_return_to_ma) && id(myDisplay).is_ready();'
+          then:
+            - component.update: myDisplay
+
+  - id: temporary_assist
+    mode: single
+    then:
+      - if:
+          condition:
+            not:
+              voice_assistant.connected:
+          then:
+            - lambda: 'id(preset_message) = "HA OFFLINE";'
+            - script.execute: show_preset_feedback
+            - script.stop: temporary_assist
+      - if:
+          condition:
+            lambda: 'return id(assist_return_to_ma);'
+          then:
+            - voice_assistant.stop:
+          else:
+            - lambda: |-
+                id(assist_return_to_ma) = true;
+                id(assist_left_ma_group) = false;
+                id(phase) = 3;
+            # Pause the entire Sendspin group so nearby players do not mask
+            # the user's voice. The Radio's shared I2S bus must then stop.
+            - media_player.pause: sendspin_media_player
+            - wait_until:
+                condition:
+                  lambda: |-
+                    return id(sendspin_media_player).state !=
+                        media_player::MEDIA_PLAYER_STATE_PLAYING;
+                timeout: 8s
+            - if:
+                condition:
+                  lambda: |-
+                    return id(sendspin_media_player).state ==
+                        media_player::MEDIA_PLAYER_STATE_PLAYING;
+                then:
+                  - logger.log:
+                      level: ERROR
+                      format: "Assist cancelled: Sendspin group did not pause"
+                  - lambda: 'id(assist_return_to_ma) = false;'
+                  - script.execute: reset_display
+                else:
+                  - wait_until:
+                      condition:
+                        lambda: |-
+                          return !id(music_active) &&
+                              id(radio_speaker).is_stopped();
+                      timeout: 6s
+                  - if:
+                      condition:
+                        lambda: |-
+                          return id(music_active) ||
+                              !id(radio_speaker).is_stopped();
+                      then:
+                        # If MA paused the group but the local output has not
+                        # drained, release only this Radio's I2S bus as a
+                        # fallback. SWITCH will rejoin it after Assist.
+                        - lambda: 'id(assist_left_ma_group) = true;'
+                        - media_player.stop: music_source_player
+                        - wait_until:
+                            condition:
+                              lambda: |-
+                                return !id(music_active) &&
+                                    id(radio_speaker).is_stopped();
+                            timeout: 6s
+                  - if:
+                      condition:
+                        lambda: |-
+                          return id(music_active) ||
+                              !id(radio_speaker).is_stopped();
+                      then:
+                        - logger.log:
+                            level: ERROR
+                            format: "Assist cancelled: Radio did not release the I2S bus"
+                        - lambda: 'id(assist_return_to_ma) = false;'
+                        - if:
+                            condition:
+                              lambda: 'return id(assist_left_ma_group);'
+                            then:
+                              - sendspin.switch: sendspin_hub
+                        - media_player.play: sendspin_media_player
+                        - script.execute: reset_display
+                      else:
+                        - light.turn_on: screen_backlight
+                        - script.execute: reset_display
+                        - voice_assistant.start:
+                            silence_detection: true
+
+  - id: finish_temporary_assist
+    mode: single
+    then:
+      - wait_until:
+          condition:
+            not:
+              voice_assistant.is_running:
+          timeout: 10s
+      - if:
+          condition:
+            lambda: 'return id(assist_return_to_ma);'
+          then:
+            - lambda: |-
+                id(assist_return_to_ma) = false;
+                id(phase) = 1;
+            # Release the microphone bus before Sendspin can restart I2S.
+            - micro_wake_word.stop:
+            - wait_until:
+                condition:
+                  not:
+                    micro_wake_word.is_running:
+                timeout: 3s
+            - delay: 200ms
+            - if:
+                condition:
+                  lambda: 'return id(assist_left_ma_group);'
+                then:
+                  - sendspin.switch: sendspin_hub
+                  - delay: 300ms
+            - media_player.play: sendspin_media_player
+            - wait_until:
+                condition:
+                  lambda: 'return id(music_active);'
+                timeout: 8s
+            - lambda: 'id(assist_left_ma_group) = false;'
+            - script.execute: reset_display
+
+  - id: go_assist
+    then:
+        - if:
+            condition:
+              not:
+                voice_assistant.connected:
+            then:
+              - lambda: 'id(preset_message) = "HA OFFLINE";'
+              - script.execute: show_preset_feedback
+              - script.stop: go_assist
+        - light.turn_on: screen_backlight
+        - lambda: |-
+            id(lightTO) = 0;
+        - if:
+            condition:
+              lambda: 'return(id(phase) == 3 || id(phase) == 4);'
+            then:
+              - if:
+                  condition:
+                    voice_assistant.is_running:
+                  then:
+                    - voice_assistant.stop:
+                    - wait_until:
+                        not:
+                          voice_assistant.is_running:
+              - if:
+                  condition:
+                    media_player.is_announcing:
+                      id: speaker_media_player
+                  then:
+                    - media_player.stop:
+                        id: speaker_media_player
+                        announcement: true
+              - if:
+                  condition:
+                    media_player.is_playing:
+                      id: speaker_media_player
+                  then:
+                    - media_player.stop:
+                        id: speaker_media_player
+              - micro_wake_word.start:
+              - lambda: |-
+                  id(mute) = false;
+                  id(auto_mute_active) = false;
+                  id(phase) = 1;
+              - script.execute: reset_display
+            else:
+              - if:
+                  condition:
+                    media_player.is_announcing:
+                      id: speaker_media_player
+                  then:
+                    - media_player.stop:
+                        id: speaker_media_player
+                        announcement: true
+              - if:
+                  condition:
+                    media_player.is_playing:
+                      id: speaker_media_player
+                  then:
+                    - media_player.stop:
+                        id: speaker_media_player
+              - if:
+                  condition:
+                    voice_assistant.is_running:
+                  then:
+                    - voice_assistant.stop:
+                    - wait_until:
+                        not:
+                          voice_assistant.is_running:
+              - micro_wake_word.stop:
+              - lambda: |-
+                  id(phase) = 3;
+              - script.execute: reset_display
+              - voice_assistant.start:
+
+  - id: mute_unmute
+    then:
+        - light.turn_on: screen_backlight
+        - lambda: |-
+            id(lightTO) = 0;
+        - if:
+            condition:
+              lambda: |-
+                return !id(assist_return_to_ma) &&
+                    (id(music_active) ||
+                     id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING);
+            then:
+              # The Sendspin media player controls mute for every member of
+              # the current Music Assistant group, not only this Radio.
+              - if:
+                  condition:
+                    media_player.is_muted: sendspin_media_player
+                  then:
+                    - media_player.unmute: sendspin_media_player
+                  else:
+                    - media_player.mute: sendspin_media_player
+              - script.execute: schedule_music_refresh
+            else:
+              - if:
+                  condition:
+                    lambda: 'return id(mute);'
+                  then:
+                    - logger.log: "unmute!"
+                    - media_player.volume_set:
+                        id: speaker_media_player
+                        volume: !lambda 'return id(Vol);'
+                    - lambda: id(mute) = false;
+                    - lambda: id(auto_mute_active) = false;
+                  else:
+                    - logger.log: "mute!"
+                    - media_player.volume_set:
+                        id: speaker_media_player
+                        volume: '0'
+                    - lambda: id(mute) = true;
+                    - lambda: id(auto_mute_active) = false;
+        - lambda: |-
+            id(volume_display_active) = true;
+            id(volume_display_timer) = 0;
+        - script.execute: schedule_volume_update
+        - script.execute: reset_display    
+
+  - id: jack_detect_high
+    then:
+       - logger.log: "Jack detect high -> route to speaker"
+       - output.turn_off: dac_mute
+       - lambda: |-
+           id(my_es8388).write_byte(0x1D, 0x20);
+           id(my_es8388).write_byte(0x1C, 0x10);
+           id(my_es8388).write_byte(0x04, 0x30);
+
+  - id: jack_detect_low
+    then:
+       - logger.log: "Jack detect low -> route to line out"
+       - output.turn_on: dac_mute
+       - lambda: |-
+           id(my_es8388).write_byte(0x1D, 0x00);
+           id(my_es8388).write_byte(0x1C, 0x00);
+           id(my_es8388).write_byte(0x04, 0x0C);
+
+  - id: adjust_volume
+    parameters:
+      delta: float
+    then:
+      - light.turn_on: screen_backlight
+      - if:
+          condition:
+            lambda: |-
+              return !id(assist_return_to_ma) &&
+                  (id(music_active) ||
+                   id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING);
+          then:
+            # Use the server's current group volume, including changes made in HA.
+            - media_player.volume_set:
+                id: sendspin_media_player
+                volume: !lambda |-
+                  const float current = id(sendspin_media_player).volume;
+                  return clamp(current + delta, 0.0f, 1.0f);
+            - media_player.unmute: sendspin_media_player
+            - lambda: 'id(lightTO) = 0;'
+            - script.execute: schedule_music_refresh
+            - script.stop: adjust_volume
+      - lambda: |-
+          id(lightTO) = 0;          
+          float scale = 1.0f;
+          
+          if(id(Vol) < 0.03f) scale = 0.05f;
+          else if(id(Vol) < 0.05f) scale = 0.40f;
+          else if(id(Vol) < 0.3f) scale = 0.50f;
+          else if(id(Vol) < 0.5f) scale = 0.60f;
+
+          id(Vol) += delta * scale;
+          if (id(Vol) < 0) id(Vol) = 0;
+          if (id(Vol) > 1) id(Vol) = 1;
+          id(volume_display_active) = true;
+          id(volume_display_timer) = 0;
+          id(mute) = false;
+          int v = id(Vol) * 100;
+          if(id(Vol) < 0.1f)
+          {
+             id(my_es8388).write_byte(46, 23 + v);
+             id(my_es8388).write_byte(47, 23 + v);          
+             id(my_es8388).write_byte(48, 23 + v);          
+             id(my_es8388).write_byte(49, 23 + v);          
+          }
+          else
+          {
+             id(my_es8388).write_byte(46, 33);
+             id(my_es8388).write_byte(47, 33);          
+             id(my_es8388).write_byte(48, 33);          
+             id(my_es8388).write_byte(49, 33);        
+           }               
+          
+      - media_player.volume_set:
+          id: speaker_media_player
+          volume: !lambda return id(Vol);
+      - delay: 200ms
+      - script.execute: schedule_volume_update
+      - script.execute: reset_display
+
+  - id: schedule_volume_update
+#    mode: restart
+    then:
+#      - delay: 400ms
+      - lambda: |-
+          if (id(volume_display_active) && id(myDisplay).is_ready()) {
+            id(myDisplay).update();
+          }
+
+  - id: reset_display
+#    mode: restart
+    then: 
+       - logger.log: "===> reset_display" 
+       - lambda: |-
+            id(lightTO) = 0;
+            if ((id(music_active) ||
+                 id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING) &&
+                !id(assist_return_to_ma)) {
+              id(myDisplay).show_page(musicP);
+              id(myDisplay).update();
+              return;
+            }
+            if (id(mic_muted)) {
+              id(myDisplay).show_page(muteMicP);
+              id(myDisplay).update();
+              return;
+            }
+
+            if ((id(phase) == 0) && (!id(logo).is_running())) {
+              id(logo).execute();
+            } else if (id(phase) == 1) {
+              id(waiting).execute();
+            } else if (id(phase) == 2) {
+              id(external_player).execute();
+            } else if (id(phase) == 3) {
+              id(listening).execute();
+            } else if (id(phase) == 4) {
+              id(answering).execute();
+            }
+
+  - id: logo
+    then:
+       - logger.log: "===> logo"
+       - media_player.speaker.play_on_device_media_file:
+           id: speaker_media_player
+           media_file: little_sound
+           announcement: false
+       - lambda: |-
+           id(myDisplay).show_page(logoP);
+           id(myDisplay).update();
+           id(lightTO) = 0;
+       - light.turn_on: screen_backlight
+       - delay: 8sec
+       - script.execute: wait_for_wifi_ready
+
+  - id: wait_for_wifi_ready
+    mode: restart
+    then:
+       - logger.log: "Waiting for WiFi before entering waiting state"
+       - while:
+           condition:
+             not:
+               wifi.connected:
+           then:
+             - lambda: |-
+                 id(myDisplay).show_page(wifiWaitingP);
+                 id(myDisplay).update();
+                 id(lightTO) = 0;
+             - light.turn_on: screen_backlight
+             - delay: 1s
+       - logger.log: "WiFi connected, moving to waiting state"
+       - lambda: 'id(phase) = 1;'
+       - script.execute: reset_display
+
+  - id: update_playback_mode
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return id(music_active);'
+          then:
+            - script.stop: enter_idle_mode
+            - script.execute: mute_off
+            - micro_wake_word.stop:
+            - if:
+                condition:
+                  lambda: 'return !id(assist_return_to_ma);'
+                then:
+                  - lambda: 'id(phase) = 5;'
+                  - script.execute: reset_display
+          else:
+            - script.execute: enter_idle_mode
+
+  - id: enter_idle_mode
+    mode: restart
+    then:
+      # A station change briefly stops the local source while MA remains
+      # PLAYING. Do not open the microphone during that transition.
+      - delay: 1200ms
+      - wait_until:
+          condition:
+            lambda: 'return id(radio_speaker).is_stopped();'
+          timeout: 4s
+      - if:
+          condition:
+            lambda: |-
+              return !id(music_active) && !id(assist_return_to_ma) &&
+                  id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING &&
+                  id(radio_speaker).is_stopped();
+          then:
+            - lambda: 'id(phase) = 1;'
+            - script.execute: reset_display
+
+  - id: waiting
+    mode: restart
+    then:
+               - if:
+                   condition:
+                         voice_assistant.is_running:
+                   then:
+                      - delay: 1s
+                      - voice_assistant.stop:
+               - script.execute: mute_on
+               - if:
+                   condition:
+                     and:
+                       - lambda: |-
+                           return !id(music_active) && !id(mic_muted) &&
+                               id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING &&
+                               id(radio_speaker).is_stopped();
+                       - not:
+                           micro_wake_word.is_running:
+                   then:
+                     - micro_wake_word.start:
+               - logger.log: "===> wakeword"
+               - lambda: |-
+                   id(myDisplay).show_page(waitingP);
+                   id(myDisplay).update();
+                   id(lightTO) = 0;
+               - light.turn_on: screen_backlight
+
+
+  - id: listening
+    mode: restart
+    then:
+       - logger.log: "===> listening"
+       - script.execute: mute_on
+       - lambda: |-
+            id(myDisplay).show_page(listeningP);
+            id(myDisplay).update();
+            id(lightTO) = 0;
+
+       - light.turn_on: screen_backlight
+
+
+  - id: answering
+    mode: restart
+    then:
+       - logger.log: "===> answering"
+       - script.execute: mute_off
+       - lambda: |-
+            id(myDisplay).show_page(answeringP);
+            id(myDisplay).update();
+            id(lightTO) = 0;
+       - light.turn_on: screen_backlight
+       - delay: 10s
+
+
+
+
+  - id: external_player
+    mode: restart
+    then:
+       - logger.log: "===> front end player"
+#       - script.execute: mute_off
+       - lambda: |-
+            id(myDisplay).show_page(waitingBP);
+            id(myDisplay).update();
+            id(lightTO) = 0;
+       - light.turn_on: screen_backlight
+
+  - id: mute_on
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(auto_mute_active);'
+          then:
+            - media_player.volume_set:
+                id: speaker_media_player
+                volume: '0'
+      - lambda: |-
+          id(mute) = true;
+          id(auto_mute_active) = true;
+          id(volume_display_active) = true;
+          id(volume_display_timer) = 0;
+      - script.execute: schedule_volume_update
+
+  - id: mute_off
+    then:
+      - if:
+          condition:
+            lambda: 'return id(auto_mute_active);'
+          then:
+            - media_player.volume_set:
+                id: speaker_media_player
+                volume: !lambda return(id(Vol));
+      - lambda: |-
+          id(mute) = false;
+          id(auto_mute_active) = false;
+          id(volume_display_active) = true;
+          id(volume_display_timer) = 0;
+      - script.execute: schedule_volume_update
+      
+     
+      
+      
+      
+      
+      

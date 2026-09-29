@@ -1,0 +1,15 @@
+{
+  "name": "raspiaudio.radio",
+  "version": "2026.9.5",
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "ota": {
+         "md5": "a6ac830142c386b21be2ae4a3d982c1c",  
+         "path": "https://raw.githubusercontent.com/RASPIAUDIO/esphomeRadio/main/update_firmware.bin",
+         "offset": 0,
+         "summary": "Latest firmware: stable with new features (see forum.raspiaudio.com)"
+         }
+    }
+    ]     
+}

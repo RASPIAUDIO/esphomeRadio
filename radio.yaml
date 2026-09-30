@@ -1,6 +1,6 @@
 substitutions:
-  name: raspiaudio-radio-full
-  friendly_name: Raspiaudio Radio Full
+  name: raspiaudio-radio
+  friendly_name: Raspiaudio Radio
 
 
 esphome:
@@ -9,7 +9,7 @@ esphome:
   min_version: 2026.9.0
   name_add_mac_suffix: false
   project:
-    name: raspiaudio.radio-full
+    name: raspiaudio.radio
     version: "2026.9.5"
   on_boot:
     - priority: 800
@@ -39,6 +39,7 @@ esphome:
         - lambda: |-
                 id(lightTO) = 0;
                 id(phase) = 0;
+        - script.execute: apply_local_codec_volume
         - media_player.volume_set:
                 id: speaker_media_player
                 volume: !lambda return id(Vol);
@@ -458,6 +459,12 @@ globals:
     type: float
     initial_value: '0.6'
     restore_value: true
+  - id: ma_volume_target_percent
+    type: int
+    initial_value: '-1'
+  - id: ma_volume_last_command_ms
+    type: uint32_t
+    initial_value: '0'
   - id: phase
     type: int
     initial_value: '0'
@@ -2709,6 +2716,7 @@ script:
                     lambda: 'return id(mute);'
                   then:
                     - logger.log: "unmute!"
+                    - script.execute: apply_local_codec_volume
                     - media_player.volume_set:
                         id: speaker_media_player
                         volume: !lambda 'return id(Vol);'
@@ -2757,12 +2765,31 @@ script:
                   (id(music_active) ||
                    id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING);
           then:
-            # Use the server's current group volume, including changes made in HA.
+            # Start from MA's reported volume, but accumulate rapid encoder
+            # events locally while the server's acknowledgement is in flight.
             - media_player.volume_set:
                 id: sendspin_media_player
                 volume: !lambda |-
-                  const float current = id(sendspin_media_player).volume;
-                  return clamp(current + delta, 0.0f, 1.0f);
+                  const float reported = id(sendspin_media_player).volume;
+                  int current = std::isfinite(reported)
+                      ? static_cast<int>(std::roundf(clamp(reported, 0.0f, 1.0f) * 100.0f))
+                      : 0;
+                  const uint32_t now = millis();
+                  if (id(ma_volume_target_percent) >= 0 &&
+                      now - id(ma_volume_last_command_ms) < 700) {
+                    current = id(ma_volume_target_percent);
+                  }
+                  // About 1% per encoder event below 20%; keep 5% above it.
+                  // Stop at the boundary instead of jumping across it.
+                  int step = static_cast<int>(std::roundf(delta *
+                      (current <= 20 ? 20.0f : 100.0f)));
+                  int next = current + step;
+                  if (step < 0 && current > 20 && next < 20)
+                    next = 20;
+                  next = clamp(next, 0, 100);
+                  id(ma_volume_target_percent) = next;
+                  id(ma_volume_last_command_ms) = now;
+                  return next / 100.0f;
             - media_player.unmute: sendspin_media_player
             - lambda: 'id(lightTO) = 0;'
             - script.execute: schedule_music_refresh
@@ -2771,37 +2798,23 @@ script:
           id(lightTO) = 0;          
           float scale = 1.0f;
           
-          if(id(Vol) < 0.03f) scale = 0.05f;
-          else if(id(Vol) < 0.05f) scale = 0.40f;
+          if(id(Vol) <= 0.20f) scale = 0.20f;
           else if(id(Vol) < 0.3f) scale = 0.50f;
           else if(id(Vol) < 0.5f) scale = 0.60f;
 
+          const float current = id(Vol);
           id(Vol) += delta * scale;
+          if (delta < 0.0f && current > 0.20f && id(Vol) < 0.20f)
+            id(Vol) = 0.20f;
           if (id(Vol) < 0) id(Vol) = 0;
           if (id(Vol) > 1) id(Vol) = 1;
           id(volume_display_active) = true;
           id(volume_display_timer) = 0;
           id(mute) = false;
-          int v = id(Vol) * 100;
-          if(id(Vol) < 0.1f)
-          {
-             id(my_es8388).write_byte(46, 23 + v);
-             id(my_es8388).write_byte(47, 23 + v);          
-             id(my_es8388).write_byte(48, 23 + v);          
-             id(my_es8388).write_byte(49, 23 + v);          
-          }
-          else
-          {
-             id(my_es8388).write_byte(46, 33);
-             id(my_es8388).write_byte(47, 33);          
-             id(my_es8388).write_byte(48, 33);          
-             id(my_es8388).write_byte(49, 33);        
-           }               
-          
+      - script.execute: apply_local_codec_volume
       - media_player.volume_set:
           id: speaker_media_player
           volume: !lambda return id(Vol);
-      - delay: 200ms
       - script.execute: schedule_volume_update
       - script.execute: reset_display
 
@@ -2812,6 +2825,15 @@ script:
       - lambda: |-
           if (id(volume_display_active) && id(myDisplay).is_ready()) {
             id(myDisplay).update();
+          }
+
+  - id: apply_local_codec_volume
+    then:
+      - lambda: |-
+          const int percent = static_cast<int>(std::roundf(clamp(id(Vol), 0.0f, 1.0f) * 100.0f));
+          const uint8_t codec_volume = id(Vol) < 0.10f ? 23 + percent : 33;
+          for (uint8_t reg = 0x2E; reg <= 0x31; reg++) {
+            id(my_es8388).write_byte(reg, codec_volume);
           }
 
   - id: reset_display
@@ -2887,7 +2909,24 @@ script:
             lambda: 'return id(music_active);'
           then:
             - script.stop: enter_idle_mode
-            - script.execute: mute_off
+            # Do not queue a voice-player volume command here: it can arrive
+            # after MA's volume and overwrite the shared physical output.
+            - lambda: |-
+                id(mute) = false;
+                id(auto_mute_active) = false;
+            # Both the Assist and MA mixer inputs set volume on the same
+            # physical speaker. Restore MA's level after the Assist path.
+            - speaker.volume_set:
+                id: radio_speaker
+                volume: !lambda |-
+                  const float volume = id(sendspin_media_player).volume;
+                  return std::isfinite(volume) ? clamp(volume, 0.0f, 1.0f) : 1.0f;
+            # Local voice volume below 10% also attenuates the shared ES8388
+            # output registers; MA always needs their normal full-scale value.
+            - lambda: |-
+                for (uint8_t reg = 0x2E; reg <= 0x31; reg++) {
+                  id(my_es8388).write_byte(reg, 0x21);
+                }
             - micro_wake_word.stop:
             - if:
                 condition:
@@ -2928,23 +2967,33 @@ script:
                       - delay: 1s
                       - voice_assistant.stop:
                - script.execute: mute_on
-               - if:
-                   condition:
-                     and:
-                       - lambda: |-
-                           return !id(music_active) && !id(mic_muted) &&
-                               id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING &&
-                               id(radio_speaker).is_stopped();
-                       - not:
-                           micro_wake_word.is_running:
-                   then:
-                     - micro_wake_word.start:
                - logger.log: "===> wakeword"
                - lambda: |-
                    id(myDisplay).show_page(waitingP);
                    id(myDisplay).update();
                    id(lightTO) = 0;
                - light.turn_on: screen_backlight
+               # The Assist announcement can report IDLE before the shared
+               # I2S speaker has finished draining. Retry wake-word startup
+               # only after that output is actually released.
+               - wait_until:
+                   condition:
+                     lambda: |-
+                       return id(radio_speaker).is_stopped() || id(music_active) ||
+                           id(assist_return_to_ma) || id(va).is_running();
+                   timeout: 8s
+               - if:
+                   condition:
+                     and:
+                       - lambda: |-
+                           return !id(music_active) && !id(mic_muted) &&
+                               !id(assist_return_to_ma) && !id(va).is_running() &&
+                               id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING &&
+                               id(radio_speaker).is_stopped();
+                       - not:
+                           micro_wake_word.is_running:
+                   then:
+                     - micro_wake_word.start:
 
 
   - id: listening
@@ -3008,6 +3057,7 @@ script:
           condition:
             lambda: 'return id(auto_mute_active);'
           then:
+            - script.execute: apply_local_codec_volume
             - media_player.volume_set:
                 id: speaker_media_player
                 volume: !lambda return(id(Vol));

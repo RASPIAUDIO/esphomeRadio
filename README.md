@@ -4,13 +4,9 @@ Unified ESPHome firmware for the ESP32-S3 RASPIAUDIO Radio, version **2026.9.5**
 The source is [radio.yaml](radio.yaml); keep [images/](images/) beside it when
 building.
 
-Firmware ESPHome unifié pour la Radio RASPIAUDIO ESP32-S3, version
-**2026.9.5**. Le fichier source est [radio.yaml](radio.yaml) ; conservez
-[images/](images/) à côté pour la compilation.
 
-[English](#english) · [Français](#français)
 
-## English
+
 
 ### Features
 

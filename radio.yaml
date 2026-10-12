@@ -1,7 +1,27 @@
+# Raspiaudio Radio Full AEC + Improv BLE — light UI + sound cues candidate.
+# Standalone copy of UI2: user-selected startup and listening recordings.
+# The validated radio_full_aec_ble_ui.yaml remains unchanged.
+# Pastel backgrounds, shared event-driven renderer, 16px multi-line voice answers.
+# Only the original Raspiaudio logo bitmap is needed from images/.
+# Based on AEC4 with Left/Right/Both microphone selection.
+# Uses ESPHome's default 8 MiB partition table; no CSV or other YAML is required.
+# Keep images/ and sounds/ beside this file; fonts, wake-word models and the pinned audio
+# backend are downloaded by ESPHome during the first build.
+# ESPHome 2026.9.0 or newer is required. Task-priority tuning was verified with
+# 2026.9.0; recheck it when upgrading ESPHome's micro_wake_word implementation.
+# Partition layout matches the published Radio firmware (ESPHome 2026.9.0).
+# Devices already using this default layout need no partition migration for OTA.
+# Earlier AEC/BLE experiments used a custom layout: OTA does not replace it.
+# Returning those devices to the default layout requires a planned USB migration;
+# back up settings first, as the NVS location changes.
+
+# Device identity: kept unchanged for the commissioned AEC Radio.
+
 substitutions:
   name: raspiaudio-radio
   friendly_name: Raspiaudio Radio
 
+# Separate build directory; the accepted AEC-only configuration is unchanged.
 
 esphome:
   name: ${name}
@@ -10,7 +30,7 @@ esphome:
   name_add_mac_suffix: false
   project:
     name: raspiaudio.radio
-    version: "2026.9.5"
+    version: 2026.9.6
   on_boot:
     - priority: 800
       then:
@@ -24,27 +44,49 @@ esphome:
               lambda: return id(myDisplay).is_ready();
             then:
               - lambda: |-
-                    id(myDisplay).show_page(logoP);
-                    id(myDisplay).update();
+                  id(myDisplay).show_page(logoP);
+                  id(myDisplay).update();
               - light.turn_on: screen_backlight
             else:
-              - logger.log: "Display not ready during boot splash"
-            
+              - logger.log: Display not ready during boot splash
     - priority: -100
       then:
+        # Wi-Fi has loaded its saved credentials, but no normal loop has run yet.
+        - lambda: |-
+            id(ble_provisioning_active) = !wifi::global_wifi_component->has_sta();
+            if (id(ble_provisioning_active)) {
+              // No HA commands or MA stream may start audio during BLE setup.
+              api::global_api_server->disable_loop();
+              id(sendspin_hub).disable_loop();
+              id(radio_ble).enable();
+              id(radio_improv).start();
+              ESP_LOGI("radio_ble", "Wi-Fi setup: BLE enabled; audio services held");
+            } else {
+              ESP_LOGI("radio_ble", "Saved Wi-Fi found: BLE stays off");
+            }
         - output.turn_off: dac_mute
         - light.turn_on:
             id: screen_backlight
             brightness: 100%
         - lambda: |-
-                id(lightTO) = 0;
-                id(phase) = 0;
+            id(lightTO) = 0;
+            id(phase) = 0;
         - script.execute: apply_local_codec_volume
         - media_player.volume_set:
-                id: speaker_media_player
-                volume: !lambda return id(Vol);
+            id: speaker_media_player
+            volume: !lambda |-
+              return id(Vol);
         - script.execute: reset_display
-#      - lambda: id(my_es8388).set_volume(0.0);
+  build_path: build/raspiaudio-radio-aec-sounds1
+  includes:
+    - <freertos/task.h>
+    - <esp_bt.h>
+    - <esp_bt_main.h>
+    - <esp_heap_caps.h>
+    - <nvs_flash.h>
+
+# Radio ESP32-S3: use ESPHome's default partition table for 8 MiB flash.
+# Verified with ESPHome 2026.9.0: two 3840 KiB OTA slots and 448 KiB NVS.
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -52,41 +94,42 @@ esp32:
   framework:
     type: esp-idf
     sdkconfig_options:
-      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
-      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
-      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: y
+      CONFIG_ESP32S3_DATA_CACHE_64KB: y
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: y
+      # IDF 5.5.5 supports this on S3, but ESPHome 2026.9.0 only sets it on ESP32.
+      # use_psram alone otherwise leaves the Bluedroid host in internal RAM.
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: y
 
 preferences:
   flash_write_interval: 5s
-  
+
 psram:
   mode: octal
   speed: 80MHz
 
+# Pinned duplex/AEC backend; no legacy ES8388 ESPHome component is required.
+
 external_components:
-  - source: github://RASPIAUDIO/esphomeRadio@187efd71c9682f92dc03d22c546e6dcb729c4c36
-    components: [es8388]
+  - source: github://n-IA-hane/esphome-audio-stack@31b576975cae32379df8a025826e03b58bdd1069
+    components:
+      - esp_audio_stack
+      - esp_aec
 
 api:
-  # Music Assistant must keep playing when Home Assistant is offline.
   reboot_timeout: 0s
-# on_client_connected:
-#    - script.execute: reset_display
-#  on_client_disconnected:
-#    - script.execute: reset_display
 
 logger:
-  level: DEBUG
+  level: INFO
   logs:
     sensor: WARN
 
+# First Wi-Fi setup: Improv BLE, Improv Serial or fallback access point.
+
 wifi:
-#  ssid: xxxxx
-#  password: yyyyy
-#  power_save_mode: none
   ap:
-     ssid: "Raspiaudio-radio-full"
-     password: "12345678"
+    ssid: Raspiaudio-radio-full
+    password: '12345678'
 
 ota:
   - platform: esphome
@@ -95,6 +138,18 @@ ota:
 captive_portal:
 
 improv_serial:
+
+# BLE is never enabled automatically on an already commissioned Radio.
+esp32_ble:
+  id: radio_ble
+  enable_on_boot: false
+  use_psram: true
+  max_connections: 1
+
+esp32_improv:
+  id: radio_improv
+  # Initial setup only: Home Assistant can provision without a physical button press.
+  authorizer: none
 
 remote_receiver:
   id: ir_receiver
@@ -106,31 +161,31 @@ remote_receiver:
     then:
       - if:
           condition:
-            lambda: 'return x.command == 0xBF40;'
+            lambda: return x.command == 0xBF40;
           then:
-            - logger.log: "IR volume up"
+            - logger.log: IR volume up
             - script.execute:
                 id: adjust_volume
                 delta: 0.05
       - if:
           condition:
-            lambda: 'return x.command == 0xB748;'
+            lambda: return x.command == 0xB748;
           then:
-            - logger.log: "IR volume down"
+            - logger.log: IR volume down
             - script.execute:
                 id: adjust_volume
                 delta: -0.05
       - if:
           condition:
-            lambda: 'return((x.command == 0xFE01) && (x.address == 0xFE01));'
+            lambda: return((x.command == 0xFE01) && (x.address == 0xFE01));
           then:
-            - logger.log: "IR mute"
+            - logger.log: IR mute
             - script.execute: mute_unmute
       - if:
           condition:
-            lambda: 'return((x.command == 0xF609) && (x.address == 0xFE01));'
+            lambda: return((x.command == 0xF609) && (x.address == 0xFE01));
           then:
-            - logger.log: "IR ret"
+            - logger.log: IR ret
             - if:
                 condition:
                   lambda: |-
@@ -140,50 +195,36 @@ remote_receiver:
                   - script.execute: temporary_assist
                 else:
                   - script.execute: go_assist
-es8388:
-#  id: my_es8388
 
 i2c:
   id: codec_bus
   scl: GPIO11
   sda: GPIO18
   scan: true
+
 i2c_device:
   id: my_es8388
-  address: 0x10
+  address: 16
 
 spi:
   - id: spi_bus0
     clk_pin: GPIO12
     mosi_pin: GPIO8
-    # miso_pin: GPIOXX
     interface: hardware
 
-i2s_audio:
-  - id: i2s_audio_bus
-    i2s_lrclk_pin: GPIO16
-    i2s_bclk_pin: GPIO5
-    i2s_mclk_pin: GPIO0
-
 microphone:
-  - platform: i2s_audio
+  - platform: esp_audio_stack
     id: radio_mic
-    sample_rate: 16000
-    i2s_din_pin: GPIO4
-    bits_per_sample: 16bit
-    adc_type: external
 
+# One physical duplex output shared by voice and Music Assistant.
 
 speaker:
-  - platform: i2s_audio
+  - platform: esp_audio_stack
     id: radio_speaker
-    i2s_audio_id: i2s_audio_bus
-    i2s_dout_pin: GPIO17
-    dac_type: external
     sample_rate: 48000
-    bits_per_sample: 16bit
-    channel: stereo
+    bits_per_sample: 16
     buffer_duration: 500ms
+    num_channels: 2
   - platform: mixer
     id: radio_mixer
     output_speaker: radio_speaker
@@ -191,6 +232,12 @@ speaker:
     source_speakers:
       - id: assist_mixer_input
       - id: music_mixer_input
+      # Dedicated 48 kHz cue lane: no media-player events and no extra decoder/task.
+      - id: ui_cue_input
+        # Refill ahead of the shared main loop; a 10 ms trickle can underrun
+        # during display/API work even though delay below requests only 5 ms.
+        buffer_duration: 250ms
+        num_channels: 1
   - platform: resampler
     id: assist_speaker
     output_speaker: assist_mixer_input
@@ -208,16 +255,20 @@ media_source:
     id: sendspin_source
     buffer_size: 2000000
 
+# Canonical 44-byte-header WAV, PCM16 mono 48 kHz, prepared offline.
+# Embedded in flash at build time; no network fetch or new decoder at playback.
+audio_file:
+  - id: ui_ready_clip
+    file: sounds/start.wav
+  - id: ui_listening_clip
+    file: sounds/blup.wav
 
+# Independent logical music and voice volume controls; shared output is routed below.
 
 media_player:
   - platform: speaker
-    name: None
+    name: Voice Answer
     id: speaker_media_player
-#    volume_min: 0.5
-#    volume_max: 0.8
-#   internal: false
-#   task_stack_in_psram: true
     announcement_pipeline:
       speaker: assist_speaker
       format: WAV
@@ -226,11 +277,11 @@ media_player:
     files:
       - id: little_sound
         file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
-
     on_announcement:
+      - script.execute: stop_ui_cue
       - if:
           condition:
-            lambda: 'return(id(phase) != 2);'
+            lambda: return(id(phase) != 2);
           then:
             - lambda: |-
                 id(lightTO) = 0;
@@ -240,37 +291,44 @@ media_player:
                 }
             - if:
                 condition:
-                  lambda: 'return id(auto_mute_active);'
+                  lambda: return id(auto_mute_active);
                 then:
                   - script.execute: mute_off
       - micro_wake_word.stop:
-
     on_idle:
       - wait_until:
-         and:
-          - not:
-              media_player.is_announcing:
-                id: speaker_media_player
-          - not:
-              voice_assistant.is_running:
+          and:
+            - not:
+                media_player.is_announcing:
+                  id: speaker_media_player
+            - not:
+                voice_assistant.is_running:
       - if:
           condition:
-              lambda: 'return !id(assist_return_to_ma) && id(phase) == 4;'
+            lambda: return !id(assist_return_to_ma) && id(phase) == 4;
           then:
-            - lambda: |-
-                  id(phase) = 1;
+            - lambda: id(phase) = 1;
             - script.execute: reset_display
       - if:
           condition:
-               lambda: 'return !id(assist_return_to_ma) && id(phase) == 2;'
+            lambda: return !id(assist_return_to_ma) && id(phase) == 2;
           then:
-            - lambda: |-
-                  id(phase) = 1;
+            - lambda: id(phase) = 1;
             - script.execute: reset_display
-
+      - script.execute: aec_rearm_wake_word
+    internal: false
+    on_volume:
+      - lambda: if (std::isfinite(x)) id(Vol) = clamp(x, 0.0f, 1.0f);
+      - script.execute: aec_sync_output
+    on_mute:
+      - script.execute: aec_sync_output
+    on_unmute:
+      - script.execute: aec_sync_output
+    on_state:
+      - script.execute: aec_sync_output
   - platform: sendspin
     id: sendspin_media_player
-    name: Radio Music Assistant
+    name: Radio AEC Music Assistant
     volume_increment: 2%
     on_state:
       - if:
@@ -278,9 +336,13 @@ media_player:
             media_player.is_playing: sendspin_media_player
           then:
             - script.stop: enter_idle_mode
-            - micro_wake_word.stop:
+            - script.execute: aec_rearm_wake_word
+      - if:
+          condition:
+            lambda: return !id(assist_return_to_ma);
+          then:
+            - script.execute: aec_sync_output
       - script.execute: schedule_music_refresh
-
   - platform: speaker_source
     id: music_source_player
     internal: true
@@ -300,6 +362,8 @@ media_player:
       sample_rate: 48000
       num_channels: 2
 
+# Wake-word detection remains available during MA playback through AEC.
+
 micro_wake_word:
   id: mww
   microphone: radio_mic
@@ -315,18 +379,32 @@ micro_wake_word:
       id: stop
       internal: true
   on_wake_word_detected:
-    - if:
-        condition:
-          lambda: |-
-            return !id(mic_muted) && !id(music_active) &&
-                id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING;
-        then:
-          - light.turn_on:
-              id: screen_backlight
-              brightness: 100%
-              effect: none
-          - voice_assistant.start:
-              wake_word: !lambda return wake_word;
+    then:
+      - if:
+          condition:
+            and:
+              - voice_assistant.connected:
+              - not:
+                  voice_assistant.is_running:
+              - lambda: return !id(ble_provisioning_active) && !id(mic_muted) && !id(assist_return_to_ma);
+          then:
+            - micro_wake_word.stop:
+            - if:
+                condition:
+                  lambda: |-
+                    return id(music_active) ||
+                        id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING;
+                then:
+                  - lambda: id(aec_pending_wake_word) = wake_word;
+                  - script.execute: temporary_assist
+                else:
+                  - light.turn_on:
+                      id: screen_backlight
+                      brightness: 100%
+                      effect: none
+                  - voice_assistant.start:
+                      wake_word: !lambda |-
+                        return wake_word;
 
 voice_assistant:
   id: va
@@ -337,38 +415,78 @@ voice_assistant:
   noise_suppression_level: 2
   auto_gain: 31dBFS
   volume_multiplier: 2.0
+  on_client_connected:
+    - lambda: |-
+        ESP_LOGI("assist_connection", "Home Assistant voice connected at %lu ms since boot",
+                 static_cast<unsigned long>(millis()));
+    - script.execute: refresh_assist_waiting_display
+  on_client_disconnected:
+    - lambda: |-
+        ESP_LOGI("assist_connection", "Home Assistant voice disconnected at %lu ms since boot",
+                 static_cast<unsigned long>(millis()));
+    - script.execute: refresh_assist_waiting_display
+    - script.execute: stop_ui_cue
+  on_start:
+    - script.execute:
+        id: assist_trace
+        event: HA pipeline started
+    # A real request always takes priority over the boot melody.
+    - script.execute: stop_ui_cue
   on_listening:
-    - logger.log: "listening 3 => phase"
+    - script.execute:
+        id: assist_trace
+        event: HA listening started
+    - logger.log: listening 3 => phase
     - micro_wake_word.stop:
     - light.turn_on:
         id: screen_backlight
         brightness: 100%
         effect: none
-    - lambda: |-
-        id(phase) = 3;
-
+    - lambda: id(phase) = 3;
     - script.execute: reset_display
-
+    - script.execute:
+        id: play_ui_cue
+        kind: 2
+  on_stt_vad_start:
+    - script.execute:
+        id: assist_trace
+        event: HA detected speech start
+  on_stt_vad_end:
+    - script.execute:
+        id: assist_trace
+        event: HA detected speech end
+    - script.execute: stop_ui_cue
+    - script.execute: ui_mark_thinking
   on_stt_end:
+    - script.execute:
+        id: assist_trace
+        event: HA transcription received
     - text_sensor.template.publish:
         id: text_request
-        state: !lambda return x;
-
+        state: !lambda |-
+          return x;
+    - script.execute: ui_mark_thinking
   on_tts_start:
-    - logger.log: "answering  4 => phase"
+    - script.execute:
+        id: assist_trace
+        event: HA answer started
+    - script.execute: stop_ui_cue
+    - logger.log: answering  4 => phase
     - text_sensor.template.publish:
         id: text_response
-        state: !lambda return x;
+        state: !lambda |-
+          return x;
     - light.turn_on:
         id: screen_backlight
         brightness: 100%
         effect: none
-    - lambda: |-
-        id(phase) = 4;
+    - lambda: id(phase) = 4;
     - script.execute: reset_display
-
-
   on_end:
+    - script.execute:
+        id: assist_trace
+        event: HA pipeline ended
+    - script.execute: stop_ui_cue
     - wait_until:
         and:
           - not:
@@ -378,21 +496,22 @@ voice_assistant:
               voice_assistant.is_running:
     - if:
         condition:
-          lambda: 'return id(assist_return_to_ma);'
+          lambda: return id(assist_return_to_ma);
         then:
           - script.execute: finish_temporary_assist
         else:
           - if:
               condition:
-                lambda: 'return !id(music_active) && (id(phase) != 1);'
+                lambda: return !id(music_active) && (id(phase) != 1);
               then:
                 - lambda: id(phase) = 1;
                 - script.execute: reset_display
-
-
-
   on_error:
-    - logger.log: "ERROR!!!!!!!!!!!!!!!!"
+    - script.execute:
+        id: assist_trace
+        event: !lambda return "HA error code=" + code;
+    - script.execute: stop_ui_cue
+    - logger.log: ERROR!!!!!!!!!!!!!!!!
     - light.turn_on:
         id: screen_backlight
         brightness: 100%
@@ -400,16 +519,13 @@ voice_assistant:
     - delay: 1s
     - if:
         condition:
-          lambda: 'return id(assist_return_to_ma);'
+          lambda: return id(assist_return_to_ma);
         then:
           - script.execute: finish_temporary_assist
         else:
-          - lambda: 'if (!id(music_active)) id(phase) = 1;'
+          - lambda: if (!id(music_active)) id(phase) = 1;
           - script.execute: reset_display
 
-
-#####################
-# Internal Components
 output:
   - platform: gpio
     id: dac_mute
@@ -419,7 +535,6 @@ output:
       mode:
         output: true
       ignore_strapping_warning: true
-
   - platform: ledc
     pin:
       number: GPIO41
@@ -433,8 +548,26 @@ light:
     id: screen_backlight
     name: Screen Backlight
 
-
 globals:
+  - id: ui_ready_sound_checked
+    type: bool
+    initial_value: 'false'
+  - id: ui_cue_kind
+    type: int
+    initial_value: '0'
+  - id: ui_cue_frame
+    type: uint32_t
+    initial_value: '0'
+  - id: ui_cue_total_frames
+    type: uint32_t
+    initial_value: '0'
+  - id: ui_cue_started_ms
+    type: uint32_t
+    initial_value: '0'
+  # Closed until on_boot decides whether this is an unprovisioned device.
+  - id: ble_provisioning_active
+    type: bool
+    initial_value: 'true'
   - id: music_active
     type: bool
     initial_value: 'false'
@@ -483,17 +616,44 @@ globals:
   - id: volume_display_timer
     type: int
     initial_value: '0'
-
+  # Display state only; never used to control microphone/audio routing.
+  - id: ui_thinking
+    type: bool
+    initial_value: 'false'
+  - id: aec_pending_wake_word
+    type: std::string
+    initial_value: '""'
 
 interval:
+  - interval: 1s
+    then:
+      - script.execute: check_ready_sound
+      - if:
+          condition:
+            and:
+              - lambda: return id(ble_provisioning_active);
+              - wifi.connected:
+              - not:
+                  script.is_running: ble_finish_wifi_setup
+          then:
+            - script.execute: ble_finish_wifi_setup
+  - interval: 30s
+    then:
+      - lambda: |-
+          if (id(ble_provisioning_active)) {
+            ESP_LOGI("radio_ble", "Setup memory: internal=%u largest=%u DMA=%u largest_DMA=%u",
+                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned) heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+                     (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+          }
   - interval: 1sec
     then:
-
       - if:
           condition:
             and:
               - light.is_on: screen_backlight
-              - lambda: 'return id(lightTO) < 60;'
+              - lambda: return id(lightTO) < 60;
           then:
             - lambda: id(lightTO)++;
           else:
@@ -501,11 +661,11 @@ interval:
             - light.turn_off: screen_backlight
       - if:
           condition:
-            lambda: 'return id(volume_display_active);'
+            lambda: return id(volume_display_active);
           then:
             - if:
                 condition:
-                  lambda: 'return id(volume_display_timer) >= 3;'
+                  lambda: return id(volume_display_timer) >= 3;
                 then:
                   - lambda: |-
                       id(volume_display_active) = false;
@@ -515,16 +675,19 @@ interval:
                       }
                 else:
                   - lambda: id(volume_display_timer)++;
-
       - if:
           condition:
             and:
-              - lambda: 'return id(phase) == 0;'
+              - lambda: return id(phase) == 0;
               - not:
                   light.is_on: screen_backlight
           then:
             - light.turn_on: screen_backlight
+  - interval: 1s
+    then:
+      - script.execute: aec_tune_wake_word_task
 
+# Keep the images/ folder beside this YAML.
 
 image:
   - platform: file
@@ -532,168 +695,158 @@ image:
     id: raspiIm
     resize: 320x240
     type: RGB
-  - platform: file
-    file: images/WFWW.png
-    id: WFWWIm
-    resize: 320x240
-    type: RGB
-  - platform: file
-    file: images/W.png
-    id: WIm
-    resize: 320x240
-    type: RGB
-  - platform: file
-    file: images/LISTEN.png
-    id: LIm
-    resize: 320x240
-    type: RGB
-  - platform: file
-    file: images/ANSWER.png
-    id: AIm
-    resize: 320x240
-    type: RGB
-  - platform: file
-    file: images/mute_mic.png
-    id: muteMicIm
-    resize: 320x240
-    type: RGB
-  - platform: file
-    file: images/mute_speaker.png
-    id: muteSpeakerIm
-    resize: 320x240
-    type: RGB
 
 font:
   - file:
       type: gfonts
       family: Figtree
-      weight: 300
+      weight: 400
     id: font_request
     size: 15
+    glyphs: &ui_glyphs
+      - ' '
+      - ABCDEFGHIJKLMNOPQRSTUVWXYZ
+      - abcdefghijklmnopqrstuvwxyz
+      - 0123456789
+      - .,;:!?-_/\()[]{}<>|@#&+=*"'%
+      - °
+      - àâäáãåçéèêëíìîïñóòôöõúùûüýÿ
+      - ÀÂÄÁÃÅÇÉÈÊËÍÌÎÏÑÓÒÔÖÕÚÙÛÜÝ
+      - œŒæÆ
+      - '’‘“”…–—«»'
   - file:
       type: gfonts
       family: Figtree
-      weight: 300
+      weight: 400
     id: font_response
-    size: 15
+    size: 16
+    glyphs: *ui_glyphs
   - file:
       type: gfonts
       family: Figtree
-      weight: 300
-    id: font_battery_small
-    size: 9
-  - file:
-      type: gfonts
-      family: Figtree
-      weight: 700
-    id: font_wifi_label
-    size: 9
+      weight: 600
+    id: ui_font_primary
+    size: 26
+    glyphs: *ui_glyphs
   - file:
       type: gfonts
       family: Figtree
       weight: 600
     id: ma_font_station
-    size: 28
-    glyphs: &ma_glyphs
-      - " "
-      - "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-      - "abcdefghijklmnopqrstuvwxyz"
-      - "0123456789"
-      - ".,;:!?-_/\\()[]{}<>|@#&+=*\"'%"
-      - "°"
-      - "àâäáãåçéèêëíìîïñóòôöõúùûüýÿ"
-      - "ÀÂÄÁÃÅÇÉÈÊËÍÌÎÏÑÓÒÔÖÕÚÙÛÜÝ"
-      - "œŒæÆ"
+    size: 30
+    glyphs: *ui_glyphs
   - file:
       type: gfonts
       family: Figtree
       weight: 500
     id: ma_font_heading
     size: 22
-    glyphs: *ma_glyphs
+    glyphs: *ui_glyphs
   - file:
       type: gfonts
       family: Figtree
-      weight: 500
+      weight: 400
     id: ma_font_metadata
     size: 18
-    glyphs: *ma_glyphs
+    glyphs: *ui_glyphs
   - file:
       type: gfonts
       family: Figtree
       weight: 500
     id: ma_font_status
     size: 14
-    glyphs: *ma_glyphs
+    glyphs: *ui_glyphs
 
 color:
   - id: green
-    hex: '75D15F'
+    hex: 75D15F
   - id: red
-    hex: 'FF3131'
+    hex: FF3131
   - id: blue
-    hex: '47B7E9'
+    hex: 47B7E9
   - id: amber
-    hex: 'FBAB35'
+    hex: FBAB35
   - id: lime
-    hex: '20FC30'
+    hex: 20FC30
   - id: pink
-    hex: 'D92BBC'
+    hex: D92BBC
   - id: yellow
-    hex: 'FFC000'
+    hex: FFC000
   - id: black
     hex: '000000'
   - id: white
-    hex: 'ffffff'
+    hex: ffffff
   - id: purple
-    hex: '73264D'
+    hex: 73264D
   - id: light_blue
-    hex: 'CFE2F3'
+    hex: CFE2F3
   - id: bg_blue
     hex: '032341'
   - id: bg_purple
     hex: '301020'
   - id: bg_green
-    hex: '05350B'
+    hex: 05350B
   - id: bg_red
-    hex: '3C0000'
+    hex: 3C0000
   - id: bg_pink
-    hex: '61034D'
+    hex: 61034D
   - id: bg_charcoal
     hex: '323232'
   - id: bg_brown
-    hex: '41220D'
+    hex: 41220D
   - id: bg_grey
-    hex: '4F4F4F'
+    hex: 4F4F4F
   - id: light_green
-    hex: 'AAD1AA'
-  # Music Assistant palette shared with esphomeRadioMusic.
+    hex: AAD1AA
   - id: ma_bg
-    hex: '08131F'
+    hex: 08131F
   - id: ma_header
-    hex: '12314A'
+    hex: 12314A
   - id: ma_panel
     hex: '0E2235'
   - id: ma_footer
-    hex: '163A54'
+    hex: 163A54
   - id: ma_accent
-    hex: 'E4B95B'
+    hex: E4B95B
   - id: ma_text
-    hex: 'F2F6F9'
+    hex: F2F6F9
   - id: ma_text_muted
-    hex: 'A7BECE'
+    hex: A7BECE
   - id: ma_bar_bg
-    hex: '24455E'
+    hex: 24455E
   - id: ma_bar_fill
-    hex: '79D4C8'
+    hex: 79D4C8
   - id: ma_battery_low
-    hex: 'D95C5C'
-       
+    hex: D95C5C
+  - id: ui_connection_bg
+    hex: 'D5E3ED'
+  - id: ui_assist_bg
+    hex: 'E3DDED'
+  - id: ui_music_bg
+    hex: 'CBE4E5'
+  - id: ui_text
+    hex: '182B36'
+  - id: ui_secondary
+    hex: '405665'
+  - id: ui_accent
+    hex: '75540F'
+  - id: ui_fill
+    hex: '28766F'
+  - id: ui_warning
+    hex: '963C19'
+  - id: ui_separator
+    hex: 'A8B7C1'
+  - id: ui_track
+    hex: 'B9C3CD'
+
+# Complete Assist and Music Assistant screens, including volume and battery.
 
 display:
   - id: myDisplay
     platform: ili9xxx
     spi_id: spi_bus0
+    # Avoid allocating an internal DMA copy of the PSRAM framebuffer while BLE runs.
+    psram_dma: true
     model: ST7789V
     cs_pin: GPIO40
     dc_pin: GPIO39
@@ -703,1074 +856,66 @@ display:
     update_interval: never
     auto_clear_enabled: false
     pages:
-        - id: presetP
-          lambda: |-
-            const int w = it.get_width();
-            const int h = it.get_height();
-            it.filled_rectangle(0, 0, w, h, id(ma_bg));
-            it.filled_rectangle(12, h / 2 - 42, w - 24, 84, id(ma_panel));
-            it.rectangle(12, h / 2 - 42, w - 24, 84, id(ma_accent));
-            it.printf(w / 2, h / 2, id(ma_font_heading), id(ma_text),
-                      TextAlign::CENTER, "%s", id(preset_message).c_str());
-        - id: musicP
-          lambda: |-
-            const int w = it.get_width();
-            const int h = it.get_height();
-            auto valid = [](const std::string &s) -> bool {
-              return !s.empty() && s != "unknown" && s != "unavailable" && s != "None";
-            };
-            auto text_width = [&](display::BaseFont *font, const std::string &text) -> int {
-              int x1, y1, width, height;
-              it.get_text_bounds(0, 0, text.c_str(), font, TextAlign::TOP_LEFT,
-                                 &x1, &y1, &width, &height);
-              return width;
-            };
-            auto fit_text = [&](display::BaseFont *font, std::string text, int width) -> std::string {
-              if (text_width(font, text) <= width) return text;
-              // Shorten by whole UTF-8 characters so accented names remain valid.
-              while (!text.empty()) {
-                size_t end = text.size() - 1;
-                while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
-                text.resize(end);
-                if (text_width(font, text + "...") <= width) return text + "...";
-              }
-              return "";
-            };
-
-            const std::string title = valid(id(ma_media_title).state) ? id(ma_media_title).state : "";
-            const std::string artist = valid(id(ma_media_artist).state) ? id(ma_media_artist).state : "";
-            const std::string album = valid(id(ma_media_album).state) ? id(ma_media_album).state : "";
-            const float duration_ms = id(ma_media_duration).state;
-            // As in RadioMusic, streams without a finite duration are treated as radio.
-            const bool is_radio = !std::isfinite(duration_ms) || duration_ms <= 500.0f;
-            std::string header = "MUSIC ASSISTANT";
-            std::string main_text;
-            std::string subtitle;
-            std::string detail;
-            if (is_radio) {
-              main_text = album.empty() ? title : album;
-              subtitle = album.empty() || title == album ? "" : title;
-              detail = artist;
-            } else {
-              header = album.empty() ? header : album;
-              main_text = artist.empty() ? title : artist;
-              subtitle = artist.empty() ? "" : title;
-              const int seconds = int(duration_ms / 1000.0f + 0.5f);
-              char duration[24];
-              snprintf(duration, sizeof(duration), "%d:%02d", seconds / 60, seconds % 60);
-              detail = duration;
+      - id: presetP
+        lambda: id(ui_render).execute();
+      - id: musicP
+        lambda: id(ui_render).execute();
+      - id: logoP
+        lambda: |-
+          it.image(0, 0, id(raspiIm));
+          auto draw_volume_bar = [&]() {
+            if (!id(volume_display_active)) {
+              return;
             }
-            display::BaseFont *main_font = id(ma_font_station);
-            if (text_width(main_font, main_text) > w - 48) main_font = id(ma_font_heading);
-            main_text = fit_text(main_font, main_text, w - 48);
-            header = fit_text(id(ma_font_heading), header, w - 32);
-            subtitle = fit_text(id(ma_font_metadata), subtitle, w - 48);
-            detail = fit_text(id(ma_font_status), detail, w - 48);
-
-            // Event-driven full redraw: clear absent metadata without a scrolling timer.
-            it.filled_rectangle(0, 0, w, h, id(ma_bg));
-            it.filled_rectangle(0, 0, w, 50, id(ma_header));
-            it.filled_rectangle(0, 50, w, 3, id(ma_accent));
-            it.filled_rectangle(12, 66, w - 24, 110, id(ma_panel));
-            it.rectangle(12, 66, w - 24, 110, id(ma_accent));
-            it.filled_rectangle(12, h - 50, w - 24, 40, id(ma_footer));
-            it.printf(w / 2, 13, id(ma_font_heading), id(ma_text), TextAlign::TOP_CENTER,
-                      "%s", header.c_str());
-            it.printf(w / 2, 79, main_font, id(ma_text), TextAlign::TOP_CENTER,
-                      "%s", main_text.c_str());
-            it.printf(w / 2, 117, id(ma_font_metadata), id(ma_text_muted), TextAlign::TOP_CENTER,
-                      "%s", subtitle.c_str());
-            it.printf(w / 2, 146, id(ma_font_status), id(ma_text_muted), TextAlign::TOP_CENTER,
-                      "%s", detail.c_str());
-
-            const bool muted = id(sendspin_media_player).is_muted();
-            const float volume = id(sendspin_media_player).volume;
-            const bool volume_known = std::isfinite(volume);
-            const int volume_percent = volume_known ? int(clamp(volume, 0.0f, 1.0f) * 100 + 0.5f) : 0;
-            if (muted) {
-              it.print(24, h - 43, id(ma_font_status), id(ma_accent), "MUTED");
-            } else if (volume_known) {
-              it.printf(24, h - 43, id(ma_font_status), id(ma_text), "VOL %d%%", volume_percent);
-            } else {
-              it.print(24, h - 43, id(ma_font_status), id(ma_text_muted), "VOL --");
+            float display_volume = id(Vol);
+            if (id(mute) || id(auto_mute_active)) {
+              display_volume = 0.0f;
             }
-            const int bar_x = 106;
-            const int bar_w = w - 190;
-            it.filled_rectangle(bar_x, h - 37, bar_w, 8, id(ma_bar_bg));
-            const int filled = muted ? 0 : bar_w * volume_percent / 100;
-            if (filled > 0) it.filled_rectangle(bar_x, h - 37, filled, 8, id(ma_bar_fill));
-            if (id(usb_power_detect).state) {
-              it.print(bar_x + bar_w / 2, h - 23, id(font_wifi_label), id(ma_text_muted),
-                       TextAlign::TOP_CENTER, "USB");
+            if (display_volume < 0.0f) {
+              display_volume = 0.0f;
             }
-
-            const int battery_x = w - 57;
-            const int battery_y = h - 43;
-            it.rectangle(battery_x, battery_y, 30, 12, id(ma_text));
-            it.filled_rectangle(battery_x + 30, battery_y + 4, 3, 4, id(ma_text));
-            it.filled_rectangle(battery_x + 2, battery_y + 2, 26, 8, id(ma_bar_bg));
-            const float battery = id(battery_percent).state;
-            if (id(battery_percent).has_state() && std::isfinite(battery)) {
-              const int percent = int(clamp(battery, 0.0f, 100.0f) + 0.5f);
-              const Color battery_color = percent < 20 ? id(ma_battery_low) :
-                  percent < 50 ? id(ma_accent) : id(ma_bar_fill);
-              const int battery_fill = 26 * percent / 100;
-              if (battery_fill > 0) {
-                it.filled_rectangle(battery_x + 2, battery_y + 2, battery_fill, 8, battery_color);
-              }
-              it.printf(battery_x + 15, battery_y + 13, id(ma_font_status), id(ma_text_muted),
-                        TextAlign::TOP_CENTER, "%d%%", percent);
-            } else {
-              it.print(battery_x + 15, battery_y + 13, id(ma_font_status), id(ma_text_muted),
-                       TextAlign::TOP_CENTER, "--%");
+            if (display_volume > 1.0f) {
+              display_volume = 1.0f;
             }
-        - id: logoP
-          lambda: |-
-            it.image(0, 0, id(raspiIm));
-            auto draw_volume_bar = [&]() {
-              if (!id(volume_display_active)) {
-                return;
-              }
-              float display_volume = id(Vol);
-              if (id(mute) || id(auto_mute_active)) {
-                display_volume = 0.0f;
-              }
-              if (display_volume < 0.0f) {
-                display_volume = 0.0f;
-              }
-              if (display_volume > 1.0f) {
-                display_volume = 1.0f;
-              }
-              const int gauge_height = 18;
-              const int margin = 3;
-              const int display_width = it.get_width();
-              const int display_height = it.get_height();
-              if (display_width <= margin * 2 || display_height <= gauge_height) {
-                return;
-              }
-              const int gauge_y = display_height - gauge_height;
-              const int inner_width = display_width - margin * 2;
-              const int inner_height = gauge_height - margin * 2;
-              int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
-              if (filled_width > inner_width) {
-                filled_width = inner_width;
-              } else if (filled_width < 0) {
-                filled_width = 0;
-              }
-              it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
-              if (inner_height > 0) {
-                if (filled_width > 0) {
-                  auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
-                  it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
-                }
-                it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
-              }
-            };
-            draw_volume_bar();
-        - id: wifiWaitingP
-          lambda: |-
+            const int gauge_height = 18;
+            const int margin = 3;
             const int display_width = it.get_width();
             const int display_height = it.get_height();
-            it.filled_rectangle(0, 0, display_width, display_height, id(bg_blue));
-            it.printf(display_width / 2, display_height / 2 - 12, id(font_request), id(white), TextAlign::CENTER, "Waiting WiFi...");
-            it.printf(display_width / 2, display_height / 2 + 12, id(font_request), id(white), TextAlign::CENTER, "Connecting to network");
-        - id: waitingP
-          lambda: |-
-            it.image(0, 0, id(WFWWIm));
-            auto draw_volume_bar = [&]() {
-              if (!id(volume_display_active)) {
-                return;
+            if (display_width <= margin * 2 || display_height <= gauge_height) {
+              return;
+            }
+            const int gauge_y = display_height - gauge_height;
+            const int inner_width = display_width - margin * 2;
+            const int inner_height = gauge_height - margin * 2;
+            int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
+            if (filled_width > inner_width) {
+              filled_width = inner_width;
+            } else if (filled_width < 0) {
+              filled_width = 0;
+            }
+            it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
+            if (inner_height > 0) {
+              if (filled_width > 0) {
+                auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
+                it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
               }
-              float display_volume = id(Vol);
-              if (id(mute) || id(auto_mute_active)) {
-                display_volume = 0.0f;
-              }
-              if (display_volume < 0.0f) {
-                display_volume = 0.0f;
-              }
-              if (display_volume > 1.0f) {
-                display_volume = 1.0f;
-              }
-              const int gauge_height = 18;
-              const int margin = 3;
-              const int display_width = it.get_width();
-              const int display_height = it.get_height();
-              if (display_width <= margin * 2 || display_height <= gauge_height) {
-                return;
-              }
-              const int gauge_y = display_height - gauge_height;
-              const int inner_width = display_width - margin * 2;
-              const int inner_height = gauge_height - margin * 2;
-              int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
-              if (filled_width > inner_width) {
-                filled_width = inner_width;
-              } else if (filled_width < 0) {
-                filled_width = 0;
-              }
-              it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
-              if (inner_height > 0) {
-                if (filled_width > 0) {
-                  auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
-                  it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
-                }
-                it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
-              }
-            };
-            auto draw_battery_icon = [&]() {
-              const int margin = 4;
-              const int icon_width = 34;
-              const int icon_height = 14;
-              const int cap_width = 4;
-              const int vertical_offset = 2;
-              const int display_width = it.get_width();
-              auto draw_charging_indicator = [&](int center_x, int center_y) {
-                const int x = display_width - icon_width - cap_width - margin;
-                const int y = margin + vertical_offset;
-                it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                
-                const int bolt_width = 24;
-                const int bolt_height = 8;
-                const int left = center_x - bolt_width / 2;
-                const int top = center_y - bolt_height / 2 - 1;
-                it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-                it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-              };
-              if (display_width <= icon_width + cap_width + margin * 2) {
-                return;
-              }
-              const int x = display_width - icon_width - cap_width - margin;
-              const int y = margin + vertical_offset;
-              const int cap_height = icon_height / 2;
-              it.rectangle(x, y, icon_width, icon_height, id(black));
-              it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
-              const int inner_width = icon_width - 4;
-              const int inner_height = icon_height - 4;
-              it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
-              if (!id(battery_percent).has_state()) {
-                return;
-              }
-              const bool is_charging = id(usb_power_detect).state;
-              float percent = id(battery_percent).state;
-              if (percent < 0.0f) {
-                percent = 0.0f;
-              }
-              if (percent > 100.0f) {
-                percent = 100.0f;
-              }
-              auto level_color = id(lime);
-              if (percent < 20.0f) {
-                level_color = id(red);
-              } else if (percent < 50.0f) {
-                level_color = id(amber);
-              }
-              int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
-              if (fill_width > inner_width) {
-                fill_width = inner_width;
-              } else if (fill_width < 0) {
-                fill_width = 0;
-              }
-              if (fill_width > 0) {
-                it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
-              }
-              const int center_x = x + icon_width / 2;
-              const int center_y = y + icon_height / 2 + 1;
-              if (is_charging) {
-                draw_charging_indicator(center_x, center_y);
-              } else {
-                it.printf(center_x, center_y, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
-              }
-            };
+              it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
+            }
+          };
+          draw_volume_bar();
+      - id: wifiWaitingP
+        lambda: id(ui_render).execute();
+      - id: waitingP
+        lambda: id(ui_render).execute();
+      - id: waitingBP
+        lambda: id(ui_render).execute();
+      - id: listeningP
+        lambda: id(ui_render).execute();
+      - id: answeringP
+        lambda: id(ui_render).execute();
+      - id: muteMicP
+        lambda: id(ui_render).execute();
 
-            auto draw_wifi_icon = [&]() {
-                const int margin = 4;
-                const int battery_icon_width = 34;
-                const int cap_width = 4;
-                const int battery_icon_height = 14;
-                const int vertical_offset = 2;
-                const int display_width = it.get_width();
-                if (!id(wifi_signal_dbm).has_state()) {
-                  return;
-                }
-                const int x = display_width - battery_icon_width - cap_width - margin;
-                const int y = margin + vertical_offset;
-                const int box_size = 22;
-                const int half_box = box_size / 2;
-                const int wifi_gap = 10;
-                const int center_x = x - wifi_gap - half_box;
-                float rssi = id(wifi_signal_dbm).state;
-                auto level_color = id(red);
-                int bars = 1;
-                if (rssi > -60.0f) {
-                  level_color = id(lime);
-                  bars = 3;
-                } else if (rssi > -75.0f) {
-                  level_color = id(amber);
-                  bars = 2;
-                }
-                const int dot_x = center_x;
-                const int dot_y = y + battery_icon_height - 1;
-                const float pi = 3.14159265f;
-                const float start_deg = 200.0f;
-                const float end_deg = 340.0f;
-                const float step_deg = 5.0f;
-              auto draw_arc = [&](int radius, int thickness) {
-                for (int t = 0; t < thickness; t++) {
-                  const int r = radius - t;
-                  bool has_prev = false;
-                  int prev_x = 0;
-                  int prev_y = 0;
-                  for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
-                    const float rad = deg * pi / 180.0f;
-                    const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
-                    const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
-                    if (has_prev) {
-                      it.line(prev_x, prev_y, px, py, level_color);
-                    }
-                    prev_x = px;
-                    prev_y = py;
-                    has_prev = true;
-                  }
-                }
-              };
-
-              it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
-              if (bars >= 1) {
-                draw_arc(4, 2);
-              }
-              if (bars >= 2) {
-                draw_arc(7, 2);
-              }
-              if (bars >= 3) {
-                draw_arc(10, 2);
-              }
-            };
-
-            draw_volume_bar();
-            draw_battery_icon();
-            draw_wifi_icon();
-        - id: waitingBP
-          lambda: |-
-            it.image(0, 0, id(WIm));
-            auto draw_volume_bar = [&]() {
-              if (!id(volume_display_active)) {
-                return;
-              }
-              float display_volume = id(Vol);
-              if (id(mute) || id(auto_mute_active)) {
-                display_volume = 0.0f;
-              }
-              if (display_volume < 0.0f) {
-                display_volume = 0.0f;
-              }
-              if (display_volume > 1.0f) {
-                display_volume = 1.0f;
-              }
-              const int gauge_height = 18;
-              const int margin = 3;
-              const int display_width = it.get_width();
-              const int display_height = it.get_height();
-              if (display_width <= margin * 2 || display_height <= gauge_height) {
-                return;
-              }
-              const int gauge_y = display_height - gauge_height;
-              const int inner_width = display_width - margin * 2;
-              const int inner_height = gauge_height - margin * 2;
-              int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
-              if (filled_width > inner_width) {
-                filled_width = inner_width;
-              } else if (filled_width < 0) {
-                filled_width = 0;
-              }
-              it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
-              if (inner_height > 0) {
-                if (filled_width > 0) {
-                  auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
-                  it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
-                }
-                it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
-              }
-            };
-            auto draw_battery_icon = [&]() {
-              const int margin = 4;
-              const int icon_width = 34;
-              const int icon_height = 14;
-              const int cap_width = 4;
-              const int vertical_offset = 2;
-              const int display_width = it.get_width();
-              auto draw_charging_indicator = [&](int center_x, int center_y) {
-              const int x = display_width - icon_width - cap_width - margin;
-              const int y = margin + vertical_offset;
-              it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                            
-                const int bolt_width = 24;
-                const int bolt_height = 8;
-                const int left = center_x - bolt_width / 2;
-                const int top = center_y - bolt_height / 2 - 1;
-                it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-                it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-              };
-              if (display_width <= icon_width + cap_width + margin * 2) {
-                return;
-              }
-              const int x = display_width - icon_width - cap_width - margin;
-              const int y = margin + vertical_offset;
-              const int cap_height = icon_height / 2;
-              it.rectangle(x, y, icon_width, icon_height, id(black));
-              it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
-              const int inner_width = icon_width - 4;
-              const int inner_height = icon_height - 4;
-              it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
-              if (!id(battery_percent).has_state()) {
-                return;
-              }
-              const bool is_charging = id(usb_power_detect).state;
-              float percent = id(battery_percent).state;
-              if (percent < 0.0f) {
-                percent = 0.0f;
-              }
-              if (percent > 100.0f) {
-                percent = 100.0f;
-              }
-              auto level_color = id(lime);
-              if (percent < 20.0f) {
-                level_color = id(red);
-              } else if (percent < 50.0f) {
-                level_color = id(amber);
-              }
-              int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
-              if (fill_width > inner_width) {
-                fill_width = inner_width;
-              } else if (fill_width < 0) {
-                fill_width = 0;
-              }
-              if (fill_width > 0) {
-                it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
-              }
-              const int center_x = x + icon_width / 2;
-              const int center_y = y + icon_height / 2 + 1;           
-              if (is_charging) {
-                draw_charging_indicator(center_x, center_y);
-              } else {
-                it.printf(center_x, center_y, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
-              }
-            };
-
-            auto draw_wifi_icon = [&]() {
-              const int margin = 4;
-              const int battery_icon_width = 34;
-              const int cap_width = 4;
-              const int battery_icon_height = 14;
-              const int vertical_offset = 2;
-              const int display_width = it.get_width();
-              if (!id(wifi_signal_dbm).has_state()) {
-                return;
-              }
-              const int x = display_width - battery_icon_width - cap_width - margin;
-              const int y = margin + vertical_offset;
-              const int box_size = 22;
-              const int half_box = box_size / 2;
-              const int wifi_gap = 10;
-              const int center_x = x - wifi_gap - half_box;
-              float rssi = id(wifi_signal_dbm).state;
-              auto level_color = id(red);
-              int bars = 1;
-                if (rssi > -60.0f) {
-                  level_color = id(lime);
-                  bars = 3;
-                } else if (rssi > -75.0f) {
-                  level_color = id(amber);
-                  bars = 2;
-                }
-                const int dot_x = center_x;
-                const int dot_y = y + battery_icon_height - 1;
-                const float pi = 3.14159265f;
-                const float start_deg = 200.0f;
-                const float end_deg = 340.0f;
-                const float step_deg = 5.0f;
-              auto draw_arc = [&](int radius, int thickness) {
-                for (int t = 0; t < thickness; t++) {
-                  const int r = radius - t;
-                  bool has_prev = false;
-                  int prev_x = 0;
-                  int prev_y = 0;
-                  for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
-                    const float rad = deg * pi / 180.0f;
-                    const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
-                    const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
-                    if (has_prev) {
-                      it.line(prev_x, prev_y, px, py, level_color);
-                    }
-                    prev_x = px;
-                    prev_y = py;
-                    has_prev = true;
-                  }
-                }
-              };
-
-              it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
-              if (bars >= 1) {
-                draw_arc(4, 2);
-              }
-              if (bars >= 2) {
-                draw_arc(7, 2);
-              }
-              if (bars >= 3) {
-                draw_arc(10, 2);
-              }
-            };
-
-            
-            auto draw_speaker_icon = [&]() {
-              const int margin = 4;
-              const int icon_width = 20;
-              const int icon_height = 20;
-              const int vertical_offset = 2;
-              const int horizontal_offset = 4;
-              int t = 1;
-              if (it.get_width() <= icon_width + margin * 2) {
-                return;
-              }
-              const int x = margin + horizontal_offset;
-              const int y = margin + vertical_offset;
-              const bool is_muted = id(mute) && !id(auto_mute_active);
-              auto symbol_color = is_muted ? id(red) : id(green);
-
-              it.rectangle(x-t, y+icon_height/4-t, icon_width, icon_height/2+t+t, id(black));
-              it.triangle(x, y+icon_height/2, x+icon_width+t, y-t, x+icon_width+t, y+icon_height+t,id(black));   
-              t = 2;      
-              it.rectangle(x-t, y+icon_height/4-t, icon_width, icon_height/2+t+t, id(black));
-              it.triangle(x, y+icon_height/2, x+icon_width+t, y-t, x+icon_width+t, y+icon_height+t,id(black));                     
-              it.filled_rectangle(x, y+icon_height/4, icon_width, icon_height/2, symbol_color);
-              it.filled_triangle(x, y+icon_height/2, x+icon_width, y, x+icon_width, y+icon_height,symbol_color); 
-              it.line(x+icon_width/2, y+icon_height/4, x+icon_width/2, y+icon_height*3/4, id(black));
-            };            
-            
-            draw_volume_bar();
-            draw_speaker_icon();
-            draw_battery_icon();
-            draw_wifi_icon();           
-        - id: listeningP
-          lambda: |-
-              it.image(0, 0, id(LIm));
-              auto draw_volume_bar = [&]() {
-                if (!id(volume_display_active)) {
-                  return;
-                }
-                float display_volume = id(Vol);
-                if (id(mute) || id(auto_mute_active)) {
-                  display_volume = 0.0f;
-                }
-                if (display_volume < 0.0f) {
-                  display_volume = 0.0f;
-                }
-                if (display_volume > 1.0f) {
-                  display_volume = 1.0f;
-                }
-                const int gauge_height = 18;
-                const int margin = 3;
-                const int display_width = it.get_width();
-                const int display_height = it.get_height();
-                if (display_width <= margin * 2 || display_height <= gauge_height) {
-                  return;
-                }
-                const int gauge_y = display_height - gauge_height;
-                const int inner_width = display_width - margin * 2;
-                const int inner_height = gauge_height - margin * 2;
-                int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
-                if (filled_width > inner_width) {
-                  filled_width = inner_width;
-                } else if (filled_width < 0) {
-                  filled_width = 0;
-                }
-                it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
-                if (inner_height > 0) {
-                  if (filled_width > 0) {
-                    auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
-                    it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
-                  }
-                  it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
-                }
-              };
-              auto draw_battery_icon = [&]() {
-                const int margin = 4;
-                const int icon_width = 34;
-                const int icon_height = 14;
-                const int cap_width = 4;
-                const int vertical_offset = 2;
-                const int display_width = it.get_width();
-                auto draw_charging_indicator = [&](int center_x, int center_y) {
-                  const int x = display_width - icon_width - cap_width - margin;
-                  const int y = margin + vertical_offset;
-                  it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                  
-                  const int bolt_width = 24;
-                  const int bolt_height = 8;
-                  const int left = center_x - bolt_width / 2;
-                  const int top = center_y - bolt_height / 2 - 1;                
-                  it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-                  it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-                };
-                if (display_width <= icon_width + cap_width + margin * 2) {
-                  return;
-                }
-                const int x = display_width - icon_width - cap_width - margin;
-                const int y = margin + vertical_offset;
-                const int cap_height = icon_height / 2;
-                it.rectangle(x, y, icon_width, icon_height, id(black));
-                it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
-                const int inner_width = icon_width - 4;
-                const int inner_height = icon_height - 4;
-                it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
-                if (!id(battery_percent).has_state()) {
-                  return;
-                }
-                const bool is_charging = id(usb_power_detect).state;
-                float percent = id(battery_percent).state;
-                if (percent < 0.0f) {
-                  percent = 0.0f;
-                }
-                if (percent > 100.0f) {
-                  percent = 100.0f;
-                }
-                auto level_color = id(lime);
-                if (percent < 20.0f) {
-                  level_color = id(red);
-                } else if (percent < 50.0f) {
-                  level_color = id(amber);
-                }
-                int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
-                if (fill_width > inner_width) {
-                  fill_width = inner_width;
-                } else if (fill_width < 0) {
-                  fill_width = 0;
-                }
-                if (fill_width > 0) {
-                  it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
-                }
-                const int center_x = x + icon_width / 2;
-                const int center_y = y + icon_height / 2 + 1;
-                if (is_charging) {
-                  draw_charging_indicator(center_x, center_y);
-                } else {
-                  it.printf(center_x, center_y, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
-                }
-              };
-
-              auto draw_wifi_icon = [&]() {
-                const int margin = 4;
-                const int battery_icon_width = 34;
-                const int cap_width = 4;
-                const int battery_icon_height = 14;
-                const int vertical_offset = 2;
-                const int display_width = it.get_width();
-                if (!id(wifi_signal_dbm).has_state()) {
-                  return;
-                }
-                const int x = display_width - battery_icon_width - cap_width - margin;
-                const int y = margin + vertical_offset;
-                const int box_size = 22;
-                const int half_box = box_size / 2;
-                const int wifi_gap = 10;
-                const int center_x = x - wifi_gap - half_box;
-                float rssi = id(wifi_signal_dbm).state;
-                auto level_color = id(red);
-                int bars = 1;
-                  if (rssi > -60.0f) {
-                    level_color = id(lime);
-                    bars = 3;
-                  } else if (rssi > -75.0f) {
-                    level_color = id(amber);
-                    bars = 2;
-                  }
-                  const int dot_x = center_x;
-                  const int dot_y = y + battery_icon_height - 1;
-                  const float pi = 3.14159265f;
-                  const float start_deg = 200.0f;
-                  const float end_deg = 340.0f;
-                  const float step_deg = 5.0f;
-                auto draw_arc = [&](int radius, int thickness) {
-                  for (int t = 0; t < thickness; t++) {
-                    const int r = radius - t;
-                    bool has_prev = false;
-                    int prev_x = 0;
-                    int prev_y = 0;
-                    for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
-                      const float rad = deg * pi / 180.0f;
-                      const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
-                      const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
-                      if (has_prev) {
-                        it.line(prev_x, prev_y, px, py, level_color);
-                      }
-                      prev_x = px;
-                      prev_y = py;
-                      has_prev = true;
-                    }
-                  }
-                };
-
-                it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
-                if (bars >= 1) {
-                  draw_arc(4, 2);
-                }
-                if (bars >= 2) {
-                  draw_arc(7, 2);
-                }
-                if (bars >= 3) {
-                  draw_arc(10, 2);
-                }
-              };
-
-              draw_volume_bar();
-              draw_battery_icon();
-              draw_wifi_icon();
-        - id: answeringP
-          lambda: |-
-              it.image(0, 0, id(AIm));
-              it.rectangle(20 , 24 , 280 , 30 , Color::BLACK );
-              it.printf(30, 25, id(font_request), Color::BLACK, "%s", id(text_request).state.c_str());
-              it.rectangle(20 , 190 , 280 , 30 , Color::BLACK );
-              it.printf(30, 195, id(font_response), Color::BLACK, "%s", id(text_response).state.c_str());
-              auto draw_volume_bar = [&]() {
-                if (!id(volume_display_active)) {
-                  return;
-                }
-                float display_volume = id(Vol);
-                if (id(mute) || id(auto_mute_active)) {
-                  display_volume = 0.0f;
-                }
-                if (display_volume < 0.0f) {
-                  display_volume = 0.0f;
-                }
-                if (display_volume > 1.0f) {
-                  display_volume = 1.0f;
-                }
-                const int gauge_height = 18;
-                const int margin = 3;
-                const int display_width = it.get_width();
-                const int display_height = it.get_height();
-                if (display_width <= margin * 2 || display_height <= gauge_height) {
-                  return;
-                }
-                const int gauge_y = display_height - gauge_height;
-                const int inner_width = display_width - margin * 2;
-                const int inner_height = gauge_height - margin * 2;
-                int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
-                if (filled_width > inner_width) {
-                  filled_width = inner_width;
-                } else if (filled_width < 0) {
-                  filled_width = 0;
-                }
-                it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
-                if (inner_height > 0) {
-                  if (filled_width > 0) {
-                    auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
-                    it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
-                  }
-                  it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
-                }
-              };
-              auto draw_battery_icon = [&]() {
-                const int margin = 4;
-                const int icon_width = 34;
-                const int icon_height = 14;
-                const int cap_width = 4;
-                const int vertical_offset = 2;
-                const int display_width = it.get_width();
-                auto draw_charging_indicator = [&](int center_x, int center_y) {
-                  const int x = display_width - icon_width - cap_width - margin;
-                  const int y = margin + vertical_offset;
-                  it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                  
-                  const int bolt_width = 24;
-                  const int bolt_height = 8;
-                  const int left = center_x - bolt_width / 2;
-                  const int top = center_y - bolt_height / 2 - 1;                  
-                  it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-                  it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-                };
-                if (display_width <= icon_width + cap_width + margin * 2) {
-                  return;
-                }
-                const int x = display_width - icon_width - cap_width - margin;
-                const int y = margin + vertical_offset;
-                const int cap_height = icon_height / 2;
-                it.rectangle(x, y, icon_width, icon_height, id(black));
-                it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
-                const int inner_width = icon_width - 4;
-                const int inner_height = icon_height - 4;
-                it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
-                if (!id(battery_percent).has_state()) {
-                  return;
-                }
-                const bool is_charging = id(usb_power_detect).state;
-                float percent = id(battery_percent).state;
-                if (percent < 0.0f) {
-                  percent = 0.0f;
-                }
-                if (percent > 100.0f) {
-                  percent = 100.0f;
-                }
-                auto level_color = id(lime);
-                if (percent < 20.0f) {
-                  level_color = id(red);
-                } else if (percent < 50.0f) {
-                  level_color = id(amber);
-                }
-                int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
-                if (fill_width > inner_width) {
-                  fill_width = inner_width;
-                } else if (fill_width < 0) {
-                  fill_width = 0;
-                } 
-                if (fill_width > 0) {
-                  it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
-                }
-                const int center_x = x + icon_width / 2;
-                const int center_y = y + icon_height / 2 + 1;
-                if (is_charging) {
-                  draw_charging_indicator(center_x, center_y);
-                } else {
-                  it.printf(center_x, center_y, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
-                }
-              };            
-              auto draw_wifi_icon = [&]() {
-                const int margin = 4;
-                const int battery_icon_width = 34;
-                const int cap_width = 4;
-                const int battery_icon_height = 14;
-                const int vertical_offset = 2;
-                const int display_width = it.get_width();
-                if (!id(wifi_signal_dbm).has_state()) {
-                  return;
-                }
-                const int x = display_width - battery_icon_width - cap_width - margin;
-                const int y = margin + vertical_offset;
-                const int box_size = 22;
-                const int half_box = box_size / 2;
-                const int wifi_gap = 10;
-                const int center_x = x - wifi_gap - half_box;
-                float rssi = id(wifi_signal_dbm).state;
-                auto level_color = id(red);
-                int bars = 1;
-                  if (rssi > -60.0f) {
-                    level_color = id(lime);
-                    bars = 3;
-                  } else if (rssi > -75.0f) {
-                    level_color = id(amber);
-                    bars = 2;
-                  }
-                  const int dot_x = center_x;
-                  const int dot_y = y + battery_icon_height - 1;
-                  const float pi = 3.14159265f;
-                  const float start_deg = 200.0f;
-                  const float end_deg = 340.0f;
-                  const float step_deg = 5.0f;
-                auto draw_arc = [&](int radius, int thickness) {
-                  for (int t = 0; t < thickness; t++) {
-                    const int r = radius - t;
-                    bool has_prev = false;
-                    int prev_x = 0;
-                    int prev_y = 0;
-                    for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
-                      const float rad = deg * pi / 180.0f;
-                      const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
-                      const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
-                      if (has_prev) {
-                        it.line(prev_x, prev_y, px, py, level_color);
-                      }
-                      prev_x = px;
-                      prev_y = py;
-                      has_prev = true;
-                    }
-                  }
-                };
-
-                it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
-                if (bars >= 1) {
-                  draw_arc(4, 2);
-                }
-                if (bars >= 2) {
-                  draw_arc(7, 2);
-                }
-                if (bars >= 3) {
-                  draw_arc(10, 2);
-                }
-              };            
-              draw_volume_bar();
-              draw_battery_icon();
-              draw_wifi_icon();
-        - id: muteMicP
-          lambda: |-
-            it.image(0, 0, id(muteMicIm));
-            auto draw_volume_bar = [&]() {
-              if (!id(volume_display_active)) {
-                return;
-              }
-              float display_volume = id(Vol);
-              if (id(mute) || id(auto_mute_active)) {
-                display_volume = 0.0f;
-              }
-              if (display_volume < 0.0f) {
-                display_volume = 0.0f;
-              }
-              if (display_volume > 1.0f) {
-                display_volume = 1.0f;
-              }
-              const int gauge_height = 18;
-              const int margin = 3;
-              const int display_width = it.get_width();
-              const int display_height = it.get_height();
-              if (display_width <= margin * 2 || display_height <= gauge_height) {
-                return;
-              }
-              const int gauge_y = display_height - gauge_height;
-              const int inner_width = display_width - margin * 2;
-              const int inner_height = gauge_height - margin * 2;
-              int filled_width = static_cast<int>(inner_width * display_volume + 0.5f);
-              if (filled_width > inner_width) {
-                filled_width = inner_width;
-              } else if (filled_width < 0) {
-                filled_width = 0;
-              }
-              it.filled_rectangle(0, gauge_y, display_width, gauge_height, id(bg_charcoal));
-              if (inner_height > 0) {
-                if (filled_width > 0) {
-                  auto bar_color = id(volume_display_active) ? id(lime) : id(light_blue);
-                  it.filled_rectangle(margin, gauge_y + margin, filled_width, inner_height, bar_color);
-                }
-                it.rectangle(margin, gauge_y + margin, inner_width, inner_height, id(black));
-              }
-            };
-            auto draw_battery_icon = [&]() {
-              const int margin = 2;
-              const int icon_width = 30;
-              const int icon_height = 10;
-              const int cap_width = 4;
-              const int vertical_offset = 2;
-              const int display_width = it.get_width();
-              auto draw_charging_indicator = [&](int center_x, int center_y) {
-                const int x = display_width - icon_width - cap_width - margin;
-                const int y = margin + vertical_offset;
-                it.filled_rectangle(x+1, y+1, icon_width-2, icon_height-2, id(light_green));                
-                const int bolt_width = 24;
-                const int bolt_height = 8;
-                const int left = center_x - bolt_width / 2;
-                const int top = center_y - bolt_height / 2 - 1;
-                it.filled_triangle(left + bolt_width / 2, top, left + bolt_width, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-                it.filled_triangle(left + bolt_width / 2, top + bolt_height, left, top + bolt_height / 2, left + bolt_width / 2, top + bolt_height / 2, id(black));
-              };
-              if (display_width <= icon_width + cap_width + margin * 2) {
-                return;
-              }
-              const int x = display_width - icon_width - cap_width - margin;
-              const int y = margin + vertical_offset;
-              const int cap_height = icon_height / 2;
-              it.rectangle(x, y, icon_width, icon_height, id(black));
-              it.filled_rectangle(x + icon_width, y + (icon_height - cap_height) / 2, cap_width, cap_height, id(black));
-              const int inner_width = icon_width - 4;
-              const int inner_height = icon_height - 4;
-              it.filled_rectangle(x + 2, y + 2, inner_width, inner_height, id(bg_charcoal));
-              if (!id(battery_percent).has_state()) {
-                return;
-              }
-              const bool is_charging = id(usb_power_detect).state;
-              float percent = id(battery_percent).state;
-              if (percent < 0.0f) {
-                percent = 0.0f;
-              }
-              if (percent > 100.0f) {
-                percent = 100.0f;
-              }
-              auto level_color = id(lime);
-              if (percent < 20.0f) {
-                level_color = id(red);
-              } else if (percent < 50.0f) {
-                level_color = id(amber);
-              }
-              int fill_width = static_cast<int>(inner_width * (percent / 100.0f) + 0.5f);
-              if (fill_width > inner_width) {
-                fill_width = inner_width;
-              } else if (fill_width < 0) {
-                fill_width = 0;
-              }
-              if (fill_width > 0) {
-                it.filled_rectangle(x + 2, y + 2, fill_width, inner_height, level_color);
-              }
-              const int center_x = x + icon_width / 2;
-              const int center_y = y + icon_height / 2;
-              if (is_charging) {
-                draw_charging_indicator(center_x, center_y);
-              } else {
-                it.printf(center_x, center_y + 1, id(font_battery_small), id(black), TextAlign::CENTER, "%.0f%%", percent);
-              }
-            };
-
-            draw_volume_bar();
-            draw_battery_icon();
-            auto draw_wifi_icon = [&]() {
-              const int margin = 2;
-              const int battery_icon_width = 30;
-              const int cap_width = 4;
-              const int battery_icon_height = 10;
-              const int vertical_offset = 2;
-              const int display_width = it.get_width();
-              if (!id(wifi_signal_dbm).has_state()) {
-                return;
-              }
-              const int x = display_width - battery_icon_width - cap_width - margin;
-              const int y = margin + vertical_offset;
-              const int box_size = 22;
-              const int half_box = box_size / 2;
-              const int wifi_gap = 10;
-              const int center_x = x - wifi_gap - half_box;
-              float rssi = id(wifi_signal_dbm).state;
-              auto level_color = id(red);
-              int bars = 1;
-              if (rssi > -60.0f) {
-                level_color = id(lime);
-                bars = 3;
-                } else if (rssi > -75.0f) {
-                  level_color = id(amber);
-                  bars = 2;
-                }
-                const int dot_x = center_x;
-                const int dot_y = y + battery_icon_height - 1;
-                const float pi = 3.14159265f;
-                const float start_deg = 200.0f;
-                const float end_deg = 340.0f;
-                const float step_deg = 5.0f;
-              auto draw_arc = [&](int radius, int thickness) {
-                for (int t = 0; t < thickness; t++) {
-                  const int r = radius - t;
-                  bool has_prev = false;
-                  int prev_x = 0;
-                  int prev_y = 0;
-                  for (float deg = start_deg; deg <= end_deg; deg += step_deg) {
-                    const float rad = deg * pi / 180.0f;
-                    const int px = dot_x + static_cast<int>(roundf(cosf(rad) * r));
-                    const int py = dot_y + static_cast<int>(roundf(sinf(rad) * r));
-                    if (has_prev) {
-                      it.line(prev_x, prev_y, px, py, level_color);
-                    }
-                    prev_x = px;
-                    prev_y = py;
-                    has_prev = true;
-                  }
-                }
-              };
-
-              it.filled_rectangle(dot_x - 1, dot_y - 1, 3, 3, level_color);
-              if (bars >= 1) {
-                draw_arc(4, 2);
-              }
-              if (bars >= 2) {
-                draw_arc(7, 2);
-              }
-              if (bars >= 3) {
-                draw_arc(10, 2);
-              }
-            };
-            draw_wifi_icon();
-
-
-
-# Home Assistant Components
 sensor:
   - platform: sendspin
     id: ma_media_duration
@@ -1779,7 +924,7 @@ sensor:
     on_value:
       - script.execute: schedule_music_refresh
   - platform: rotary_encoder
-    name: "Volume"
+    name: Volume
     id: volume_encoder
     pin_a:
       number: GPIO42
@@ -1793,18 +938,16 @@ sensor:
         pullup: true
     on_anticlockwise:
       then:
-#        - delay: 400ms
         - script.execute:
             id: adjust_volume
             delta: -0.05
     on_clockwise:
       then:
-#        - delay: 400ms
         - script.execute:
             id: adjust_volume
             delta: 0.05
   - platform: rotary_encoder
-    name: "Dummy"
+    name: Dummy
     id: function_encoder
     pin_a:
       number: GPIO7
@@ -1819,14 +962,11 @@ sensor:
     on_anticlockwise:
       then:
         - light.turn_on: screen_backlight
-        - lambda: |-
-                id(lightTO) = 0;
-
+        - lambda: id(lightTO) = 0;
     on_clockwise:
       then:
         - light.turn_on: screen_backlight
-        - lambda: |-
-                id(lightTO) = 0;
+        - lambda: id(lightTO) = 0;
   - platform: adc
     id: button_adc
     pin: GPIO1
@@ -1837,45 +977,45 @@ sensor:
         then:
           - binary_sensor.template.publish:
               id: btn_confirm
-              state: OFF
+              state: false
           - binary_sensor.template.publish:
               id: btn_1
-              state: OFF
+              state: false
           - binary_sensor.template.publish:
               id: btn_2
-              state: OFF
+              state: false
           - binary_sensor.template.publish:
               id: btn_3
-              state: OFF
+              state: false
       - above: 0.41
         below: 0.45
         then:
           - binary_sensor.template.publish:
               id: btn_3
-              state: ON
+              state: true
       - above: 0.8
         below: 0.84
         then:
           - binary_sensor.template.publish:
               id: btn_confirm
-              state: ON
-      - above: 1.50
+              state: true
+      - above: 1.5
         below: 1.61
         then:
           - binary_sensor.template.publish:
               id: btn_1
-              state: ON
+              state: true
       - above: 1.98
         below: 2.03
         then:
           - binary_sensor.template.publish:
               id: btn_2
-              state: ON
+              state: true
   - platform: adc
     pin: GPIO13
     name: Battery voltage
     device_class: voltage
-    unit_of_measurement: "V"
+    unit_of_measurement: V
     accuracy_decimals: 2
     state_class: measurement
     entity_category: diagnostic
@@ -1885,57 +1025,57 @@ sensor:
       - multiply: 2
       - calibrate_linear:
           - 0.0 -> 0.0
-          # Map measured full charge to real value to compensate divider/ADC bias
           - 4.58 -> 4.20
       - exponential_moving_average:
-             alpha: 0.2
-             send_every: 2
+          alpha: 0.2
+          send_every: 2
       - delta: 0.002
     on_value:
-        then:
-          - sensor.template.publish:
-              id: battery_percent
-              state: !lambda "return x ;"
-          - lambda: |-
-              if (id(myDisplay).is_ready()) {
-                id(myDisplay).update();
-              }
+      then:
+        - sensor.template.publish:
+            id: battery_percent
+            state: !lambda |-
+              return x ;
+        - lambda: |-
+            if (id(myDisplay).is_ready()) {
+              id(myDisplay).update();
+            }
   - platform: template
     name: Battery
     id: battery_percent
     device_class: battery
-    unit_of_measurement: "%"
+    unit_of_measurement: '%'
     accuracy_decimals: 0
     state_class: measurement
     entity_category: diagnostic
     update_interval: 15s
     filters:
       - calibrate_polynomial:
-           degree: 3
-           datapoints:
-               - 4.20 -> 100.0
-               - 4.13 -> 97.1
-               - 4.10 -> 94.2
-               - 4.07 -> 88.4
-               - 4.05 -> 82.7
-               - 4.04 -> 76.9
-               - 4.04 -> 71.1
-               - 4.01 -> 65.3
-               - 3.99 -> 59.5
-               - 3.95 -> 53.8
-               - 3.93 -> 48.0
-               - 3.91 -> 42.2
-               - 3.88 -> 36.4
-               - 3.86 -> 30.6
-               - 3.84 -> 24.9
-               - 3.82 -> 19.1
-               - 3.76 -> 13.3
-               - 3.73 -> 10.4
-               - 3.70 -> 7.5
-               - 3.64 -> 4.6
-               - 3.50 -> 1.7
-               - 3.00 -> 0.0
-      - lambda: return clamp(x, 0.0f, 100.0f);   
+          degree: 3
+          datapoints:
+            - 4.20 -> 100.0
+            - 4.13 -> 97.1
+            - 4.10 -> 94.2
+            - 4.07 -> 88.4
+            - 4.05 -> 82.7
+            - 4.04 -> 76.9
+            - 4.04 -> 71.1
+            - 4.01 -> 65.3
+            - 3.99 -> 59.5
+            - 3.95 -> 53.8
+            - 3.93 -> 48.0
+            - 3.91 -> 42.2
+            - 3.88 -> 36.4
+            - 3.86 -> 30.6
+            - 3.84 -> 24.9
+            - 3.82 -> 19.1
+            - 3.76 -> 13.3
+            - 3.73 -> 10.4
+            - 3.70 -> 7.5
+            - 3.64 -> 4.6
+            - 3.50 -> 1.7
+            - 3.00 -> 0.0
+      - lambda: return clamp(x, 0.0f, 100.0f);
   - platform: wifi_signal
     name: WiFi Signal
     id: wifi_signal_dbm
@@ -1946,7 +1086,17 @@ sensor:
             if (id(myDisplay).is_ready()) {
               id(myDisplay).update();
             }
-
+  - platform: debug
+    free:
+      name: AEC Internal Heap Free
+    min_free:
+      name: AEC Internal Heap Minimum Free
+    block:
+      name: AEC Internal Heap Largest Block
+    psram:
+      name: AEC PSRAM Free
+    loop_time:
+      name: AEC Maximum Loop Time
 
 binary_sensor:
   - platform: gpio
@@ -1954,19 +1104,18 @@ binary_sensor:
       number: GPIO21
       mode:
         input: true
-#        pullup: true
     id: usb_power_detect
     name: USB Power
     device_class: power
     entity_category: diagnostic
     on_press:
-      - logger.log: "USB power detected"
+      - logger.log: USB power detected
       - lambda: |-
           if (id(myDisplay).is_ready()) {
             id(myDisplay).update();
           }
     on_release:
-      - logger.log: "USB power removed"
+      - logger.log: USB power removed
       - lambda: |-
           if (id(myDisplay).is_ready()) {
             id(myDisplay).update();
@@ -1993,11 +1142,9 @@ binary_sensor:
         pullup: true
     id: click_vol
     name: Mute
-#    disabled_by_default: true
     on_press:
       then:
         - script.execute: mute_unmute
-
   - platform: gpio
     pin:
       number: GPIO45
@@ -2008,9 +1155,9 @@ binary_sensor:
     id: click_sta
     name: Assist
     on_click:
-       - min_length: 50ms
-         max_length: 2s
-         then:
+      - min_length: 50ms
+        max_length: 2s
+        then:
           - if:
               condition:
                 lambda: |-
@@ -2020,10 +1167,8 @@ binary_sensor:
                 - script.execute: temporary_assist
               else:
                 - script.execute: go_assist
-
-
   - platform: template
-    name: "Radio 4"
+    name: Radio 4
     id: btn_confirm
     filters:
       - delayed_on_off: 30ms
@@ -2033,17 +1178,16 @@ binary_sensor:
         then:
           - script.execute:
               id: play_radio_preset
-              station: !lambda return id(radio_station_4).state;
+              station: !lambda |-
+                return id(radio_station_4).state;
       - min_length: 1800ms
         max_length: 8s
         then:
           - script.execute:
               id: save_radio_preset
               preset: 4
-
-
   - platform: template
-    name: "Radio 1"
+    name: Radio 1
     id: btn_1
     filters:
       - delayed_on_off: 30ms
@@ -2053,17 +1197,16 @@ binary_sensor:
         then:
           - script.execute:
               id: play_radio_preset
-              station: !lambda return id(radio_station_1).state;
+              station: !lambda |-
+                return id(radio_station_1).state;
       - min_length: 1800ms
         max_length: 8s
         then:
           - script.execute:
               id: save_radio_preset
               preset: 1
-
-
   - platform: template
-    name: "Radio 2"
+    name: Radio 2
     id: btn_2
     filters:
       - delayed_on_off: 30ms
@@ -2073,17 +1216,16 @@ binary_sensor:
         then:
           - script.execute:
               id: play_radio_preset
-              station: !lambda return id(radio_station_2).state;
+              station: !lambda |-
+                return id(radio_station_2).state;
       - min_length: 1800ms
         max_length: 8s
         then:
           - script.execute:
               id: save_radio_preset
               preset: 2
-
-
   - platform: template
-    name: "Radio 3"
+    name: Radio 3
     id: btn_3
     filters:
       - delayed_on_off: 30ms
@@ -2093,7 +1235,8 @@ binary_sensor:
         then:
           - script.execute:
               id: play_radio_preset
-              station: !lambda return id(radio_station_3).state;
+              station: !lambda |-
+                return id(radio_station_3).state;
       - min_length: 1800ms
         max_length: 8s
         then:
@@ -2101,96 +1244,123 @@ binary_sensor:
               id: save_radio_preset
               preset: 3
   - platform: remote_receiver
-    name: "IR OK"
+    name: IR OK
     id: ir_ok
     nec:
-      address: 0xFE01
-      command: 0xF906
+      address: 65025
+      command: 63750
     filters:
       - delayed_off: 100ms
     on_click:
-      - logger.log: "IR OK received"
+      - logger.log: IR OK received
   - platform: remote_receiver
-    name: "IR UP"
+    name: IR UP
     id: ir_up
     nec:
-      address: 0xFE01
-      command: 0xFA05
+      address: 65025
+      command: 64005
     filters:
       - delayed_off: 100ms
     on_press:
-      - logger.log: "IR UP received"
+      - logger.log: IR UP received
   - platform: remote_receiver
-    name: "IR DOWN"
+    name: IR DOWN
     id: ir_down
     nec:
-      address: 0xFE01
-      command: 0xFB04
+      address: 65025
+      command: 64260
     filters:
       - delayed_off: 100ms
     on_press:
-      - logger.log: "IR DOWN received"
+      - logger.log: IR DOWN received
   - platform: remote_receiver
-    name: "IR RIGHT"
+    name: IR RIGHT
     id: ir_right
     nec:
-      address: 0xFE01
-      command: 0xF50A
+      address: 65025
+      command: 62730
     filters:
       - delayed_off: 100ms
     on_press:
-      - logger.log: "IR RIGHT received"
+      - logger.log: IR RIGHT received
   - platform: remote_receiver
-    name: "IR LEFT"
+    name: IR LEFT
     id: ir_left
     nec:
-      address: 0xFE01
-      command: 0xFD02
+      address: 65025
+      command: 64770
     filters:
       - delayed_off: 100ms
     on_press:
-      - logger.log: "IR LEFT received"
+      - logger.log: IR LEFT received
   - platform: remote_receiver
-    name: "IR LIKE"
+    name: IR LIKE
     id: ir_like
     nec:
-      address: 0xFE01
-      command: 0xF40B
+      address: 65025
+      command: 62475
     filters:
       - delayed_off: 100ms
     on_press:
-      - logger.log: "IR LIKE received"
+      - logger.log: IR LIKE received
   - platform: remote_receiver
-    name: "IR HOME"
+    name: IR HOME
     id: ir_home
     nec:
-      address: 0xFE01
-      command: 0xFC03
+      address: 65025
+      command: 64515
     filters:
       - delayed_off: 100ms
     on_press:
-      - logger.log: "IR HOME received"
+      - logger.log: IR HOME received
   - platform: remote_receiver
-    name: "IR BIN"
+    name: IR BIN
     id: ir_bin
     nec:
-      address: 0xFE01
-      command: 0xBB44
+      address: 65025
+      command: 47940
     filters:
       - delayed_off: 100ms
     on_press:
-      - logger.log: "IR BIN received"                  
+      - logger.log: IR BIN received
+
 switch:
   - platform: template
-    id: mic_mute_switch
-    name: "Microphone Mute"
-    icon: "mdi:microphone-off"
+    id: startup_sound_enabled
+    name: Startup sound
+    icon: mdi:music-note
     entity_category: config
-    lambda: |-
-      return id(mic_muted);
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_off_action:
+      - if:
+          condition:
+            lambda: return id(ui_cue_kind) == 1;
+          then:
+            - script.execute: stop_ui_cue
+  - platform: template
+    id: listening_sound_enabled
+    name: Listening sound
+    icon: mdi:music-note
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_off_action:
+      - if:
+          condition:
+            lambda: return id(ui_cue_kind) == 2;
+          then:
+            - script.execute: stop_ui_cue
+  - platform: template
+    id: mic_mute_switch
+    name: Microphone Mute
+    icon: mdi:microphone-off
+    entity_category: config
+    lambda: return id(mic_muted);
     turn_on_action:
       - microphone.mute: radio_mic
       - lambda: id(mic_muted) = true;
+      - script.execute: stop_ui_cue
       - if:
           condition:
             voice_assistant.is_running:
@@ -2199,21 +1369,38 @@ switch:
       - micro_wake_word.stop:
       - script.execute: reset_display
     turn_off_action:
-      - microphone.unmute: radio_mic
+      # A brief cue mute must not be released before the acoustic tail is gone.
+      - lambda: id(radio_mic).set_mute_state(id(ui_cue_kind) != 0);
       - lambda: id(mic_muted) = false;
-      - if:
-          condition:
-            lambda: |-
-              return !id(music_active) &&
-                  id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING &&
-                  id(radio_speaker).is_stopped();
-          then:
-            - micro_wake_word.start:
+      - script.execute: aec_rearm_wake_word
       - script.execute: reset_display
+  - platform: esp_audio_stack
+    aec:
+      name: AEC Enabled
+      entity_category: config
+      restore_mode: ALWAYS_ON
+
+# User-selectable, persisted wake-word sensitivity; tested thresholds are unchanged.
 
 select:
   - platform: template
-    name: "Wake word sensitivity"
+    id: microphone_input
+    name: Microphone input
+    optimistic: true
+    restore_value: true
+    initial_option: Both
+    entity_category: config
+    # Preserve option order: ESPHome restores the saved selection by index.
+    options:
+      - Both
+      - Left
+      - Right
+    set_action:
+      - script.execute:
+          id: apply_radio_microphone_input
+          input: !lambda return x;
+  - platform: template
+    name: Wake word sensitivity
     optimistic: true
     initial_option: Slightly sensitive
     restore_value: true
@@ -2223,10 +1410,6 @@ select:
       - Moderately sensitive
       - Very sensitive
     on_value:
-      # Sets specific wake word probabilities computed for each particular model
-      # Note probability cutoffs are set as a quantized uint8 value, each comment has the corresponding floating point cutoff
-      # False Accepts per Hour values are tested against all units and channels from the Dinner Party Corpus.
-      # These cutoffs apply only to the specific models included in the firmware: okay_nabu@20241226.3, hey_jarvis@v2, hey_mycroft@v2
       lambda: |-
         if (x == "Slightly sensitive") {
           id(okay_nabu).set_probability_cutoff(217);    // 0.85 -> 0.000 FAPH on DipCo (Manifest's default)
@@ -2261,31 +1444,18 @@ text_sensor:
     internal: true
     on_value:
       - script.execute: schedule_music_refresh
+  # Keep full text: width-aware wrapping/ellipsis happens only in ui_render.
   - id: text_request
     platform: template
-    on_value:
-      lambda: |-
-        if(id(text_request).state.length()>40) {
-          std::string name = id(text_request).state.c_str();
-          std::string truncated = esphome::str_truncate(name.c_str(),39);
-          id(text_request).state = (truncated+"...").c_str();
-        }
-
   - id: text_response
     platform: template
-    on_value:
-      lambda: |-
-        if(id(text_response).state.length()>32) {
-          std::string name = id(text_response).state.c_str();
-          std::string truncated = esphome::str_truncate(name.c_str(),31);
-          id(text_response).state = (truncated+"...").c_str();
-        }
+
+# Four persisted station presets, editable in Home Assistant.
 
 text:
-  # Persisted station URIs; users may also edit them in the HA device settings.
   - platform: template
     id: radio_station_1
-    name: "Station button 1"
+    name: Station button 1
     icon: mdi:radio
     entity_category: config
     optimistic: true
@@ -2295,7 +1465,7 @@ text:
     mode: text
   - platform: template
     id: radio_station_2
-    name: "Station button 2"
+    name: Station button 2
     icon: mdi:radio
     entity_category: config
     optimistic: true
@@ -2305,7 +1475,7 @@ text:
     mode: text
   - platform: template
     id: radio_station_3
-    name: "Station button 3"
+    name: Station button 3
     icon: mdi:radio
     entity_category: config
     optimistic: true
@@ -2315,7 +1485,7 @@ text:
     mode: text
   - platform: template
     id: radio_station_4
-    name: "Station button 4"
+    name: Station button 4
     icon: mdi:radio
     entity_category: config
     optimistic: true
@@ -2324,14 +1494,525 @@ text:
     max_length: 255
     mode: text
 
+# Full controls and transitions, including group pause/resume and AEC output ownership.
 
-
-
-
-#########
-# Scripts
+number:
+  - platform: template
+    id: ui_sound_volume
+    name: Sound volume
+    icon: mdi:volume-medium
+    entity_category: config
+    unit_of_measurement: "%"
+    mode: slider
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 35
+    optimistic: true
+    restore_value: true
+    on_value:
+      - if:
+          condition:
+            lambda: return id(ui_cue_kind) != 0;
+          then:
+            - script.execute: aec_sync_output
 
 script:
+  - id: check_ready_sound
+    then:
+      - if:
+          condition:
+            and:
+              - wifi.connected:
+              - voice_assistant.connected:
+              - lambda: |-
+                  return !id(ble_provisioning_active) && id(phase) != 0 &&
+                      !id(ui_ready_sound_checked);
+          then:
+            # Once per boot, even if disabled or skipped because playback began.
+            - lambda: id(ui_ready_sound_checked) = true;
+            - script.execute:
+                id: play_ui_cue
+                kind: 1
+
+  - id: stop_ui_cue
+    then:
+      - if:
+          condition:
+            lambda: return id(ui_cue_kind) != 0;
+          then:
+            - script.execute: release_ui_cue
+            - script.execute: aec_sync_output
+            - script.execute: aec_rearm_wake_word
+
+  - id: release_ui_cue
+    then:
+      - script.stop: play_ui_cue
+      - lambda: |-
+          id(ui_cue_input).stop();
+          id(ui_cue_kind) = 0;
+          // Preserve the user's microphone mute; never change the HA switch.
+          id(radio_mic).set_mute_state(id(mic_muted));
+          ESP_LOGI("ui_sound", "Cue cancelled; microphone restored");
+
+  - id: play_ui_cue
+    mode: single
+    parameters:
+      kind: int
+    then:
+      - if:
+          condition:
+            lambda: |-
+                // Never interrupt an answer/announcement, unmute a user-muted
+                // output, or play the boot melody over resumed MA music.
+                const bool music = id(music_active) ||
+                    id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING;
+                return (kind != 1 && kind != 2) || id(ble_provisioning_active) ||
+                    id(va).get_api_connection() == nullptr || !wifi::global_wifi_component->is_connected() ||
+                    id(speaker_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING ||
+                    id(speaker_media_player).is_muted() || (id(mute) && !id(auto_mute_active)) ||
+                    !std::isfinite(id(ui_sound_volume).state) || id(ui_sound_volume).state <= 0 ||
+                    (music && !id(assist_return_to_ma)) ||
+                    (kind == 1 && (!id(startup_sound_enabled).state || id(va).is_running())) ||
+                    (kind == 2 && (!id(listening_sound_enabled).state || id(mic_muted) ||
+                                  !id(va).is_running() || id(phase) != 3));
+          then:
+            - script.stop: play_ui_cue
+      - if:
+          condition:
+            lambda: |-
+                // UI_CUE_WAV_BEGIN
+                // Reject an incompatible replacement before touching the mic.
+                // The offline preparation tool emits exactly this WAV layout.
+                const auto *clip = kind == 1 ? id(ui_ready_clip) : id(ui_listening_clip);
+                if (clip == nullptr || clip->data == nullptr || clip->length < 46) return true;
+                const auto *p = clip->data;
+                auto u16 = [&](size_t i) -> uint16_t { return uint16_t(p[i]) | (uint16_t(p[i + 1]) << 8); };
+                auto u32 = [&](size_t i) -> uint32_t {
+                  return uint32_t(p[i]) | (uint32_t(p[i + 1]) << 8) |
+                      (uint32_t(p[i + 2]) << 16) | (uint32_t(p[i + 3]) << 24);
+                };
+                const uint32_t bytes = u32(40);
+                return memcmp(p, "RIFF", 4) != 0 || memcmp(p + 8, "WAVEfmt ", 8) != 0 ||
+                    u32(4) != clip->length - 8 || u32(16) != 16 || u16(20) != 1 ||
+                    u16(22) != 1 || u32(24) != 48000 || u32(28) != 96000 ||
+                    u16(32) != 2 || u16(34) != 16 || memcmp(p + 36, "data", 4) != 0 ||
+                    bytes != clip->length - 44 || bytes == 0 || (bytes % 2) != 0 ||
+                    bytes > (kind == 1 ? 288000U : 192000U);
+                // UI_CUE_WAV_END
+          then:
+            - logger.log:
+                level: WARN
+                format: "UI sound skipped: expected prepared PCM16/mono/48k WAV"
+            - script.stop: play_ui_cue
+      - lambda: |-
+          id(ui_cue_kind) = kind;
+          id(ui_cue_frame) = 0;
+          const auto *clip = kind == 1 ? id(ui_ready_clip) : id(ui_listening_clip);
+          id(ui_cue_total_frames) = (clip->length - 44) / 2;
+          id(ui_cue_started_ms) = millis();
+          // The pinned microphone backend sends zero samples while muted,
+          // keeping HA's audio stream alive without transcribing our own cue.
+          id(radio_mic).set_mute_state(true);
+          id(ui_cue_input).set_audio_stream_info(audio::AudioStreamInfo(16, 1, 48000));
+          id(ui_cue_input).start();
+          ESP_LOGI("ui_sound", "%s cue started (%lu ms)", kind == 1 ? "start.wav" : "blup.wav",
+                   static_cast<unsigned long>(id(ui_cue_total_frames) / 48));
+      - micro_wake_word.stop:
+      - script.execute: aec_sync_output
+      - while:
+          condition:
+            lambda: |-
+                return id(ui_cue_kind) != 0 &&
+                    id(ui_cue_frame) < id(ui_cue_total_frames) &&
+                    millis() - id(ui_cue_started_ms) < (id(ui_cue_kind) == 1 ? 4000U : 2500U);
+          then:
+            - lambda: |-
+                // UI_CUE_PCM_BEGIN
+                // Refill up to the entire 250 ms source reserve from flash.
+                // A 5 ms automation delay is NOT a real-time scheduling promise:
+                // limiting writes to 10 ms starves audio when other work is slow.
+                // play(..., 0) accepts only available space, without blocking;
+                // no full-clip RAM copy, decoder or extra audio task is needed.
+                const uint32_t total = id(ui_cue_total_frames);
+                if (id(ui_cue_frame) >= total) return;
+                const auto *clip = id(ui_cue_kind) == 1 ? id(ui_ready_clip) : id(ui_listening_clip);
+                const uint32_t count = std::min<uint32_t>(12000U, total - id(ui_cue_frame));
+                const size_t accepted = id(ui_cue_input).play(
+                    clip->data + 44 + id(ui_cue_frame) * 2, count * sizeof(int16_t), 0);
+                id(ui_cue_frame) += accepted / sizeof(int16_t);
+                // UI_CUE_PCM_END
+            - delay: 5ms
+      - lambda: |-
+          ESP_LOGI("ui_sound", "Queued %lu/%lu frames in %lu ms (clip %lu ms)",
+                   static_cast<unsigned long>(id(ui_cue_frame)),
+                   static_cast<unsigned long>(id(ui_cue_total_frames)),
+                   static_cast<unsigned long>(millis() - id(ui_cue_started_ms)),
+                   static_cast<unsigned long>(id(ui_cue_total_frames) / 48));
+          if (id(ui_cue_frame) < id(ui_cue_total_frames))
+            ESP_LOGW("ui_sound", "Cue producer timed out; releasing audio/microphone");
+          id(ui_cue_input).finish();
+      - wait_until:
+          condition:
+            lambda: return id(ui_cue_input).is_stopped();
+          timeout: 750ms
+      # Short room/codec tail; never alter the user-facing microphone switch.
+      - delay: 60ms
+      - lambda: |-
+          id(ui_cue_input).stop();
+          id(ui_cue_kind) = 0;
+          id(radio_mic).set_mute_state(id(mic_muted));
+          ESP_LOGI("ui_sound", "Cue completed in %lu ms; microphone restored",
+                   static_cast<unsigned long>(millis() - id(ui_cue_started_ms)));
+      - script.execute: aec_sync_output
+      - script.execute: aec_rearm_wake_word
+
+  # Sparse event diagnostics only: no transcript, audio data, timer or retry.
+  - id: assist_trace
+    parameters:
+      event: std::string
+    then:
+      - lambda: |-
+          ESP_LOGI("assist_trace", "%s; uptime_ms=%lu phase=%d running=%s return_ma=%s",
+                   event.c_str(), static_cast<unsigned long>(millis()), id(phase),
+                   id(va).is_running() ? "YES" : "NO",
+                   id(assist_return_to_ma) ? "YES" : "NO");
+  - id: ui_begin_assist_display
+    then:
+      - lambda: |-
+          id(ui_thinking) = false;
+          id(text_request).publish_state("");
+          id(text_response).publish_state("");
+  - id: ui_mark_thinking
+    then:
+      - lambda: |-
+          if (!id(va).is_running() || id(myDisplay).get_active_page() != id(listeningP)) return;
+          id(ui_thinking) = true;
+          if (id(myDisplay).is_ready()) id(myDisplay).update();
+  - id: ui_render
+    then:
+      - lambda: |-
+          // One renderer shared by all non-logo pages; display-only, no audio actions.
+          auto &it = *id(myDisplay);
+          const int w = it.get_width();
+          const int h = it.get_height();
+          const auto *page = it.get_active_page();
+          const bool music = page == id(musicP);
+          const bool waiting = page == id(waitingP);
+          const bool connecting = page == id(wifiWaitingP) ||
+              (waiting && (!wifi::global_wifi_component->is_connected() || id(va).get_api_connection() == nullptr));
+          const Color background = connecting ? id(ui_connection_bg) : music ? id(ui_music_bg) : id(ui_assist_bg);
+          const Color ink = id(ui_text);
+          const Color secondary = id(ui_secondary);
+          const Color accent = id(ui_accent);
+          it.fill(background);  // Clear missing metadata and previous questions on every redraw.
+          
+          // UI_TEXT_HELPERS_BEGIN
+          auto valid = [](const std::string &s) -> bool {
+            return !s.empty() && s != "unknown" && s != "unavailable" && s != "None";
+          };
+          auto text_width = [&](display::BaseFont *font, const std::string &s) -> int {
+            int x1, y1, width, height;
+            it.get_text_bounds(0, 0, s.c_str(), font, TextAlign::TOP_LEFT, &x1, &y1, &width, &height);
+            return width;
+          };
+          auto pop_utf8 = [](std::string &s) {
+            if (s.empty()) return;
+            size_t end = s.size() - 1;
+            while (end > 0 && (static_cast<unsigned char>(s[end]) & 0xC0) == 0x80) --end;
+            s.resize(end);
+          };
+          auto fit_text = [&](display::BaseFont *font, std::string s, int width) -> std::string {
+            // Scan only the visible prefix, not every suffix of a long transcript.
+            std::string prefix;
+            size_t pos = 0;
+            while (pos < s.size() && pos < 512 && s[pos] != '\n' && s[pos] != '\r') {
+              size_t next = pos + 1;
+              while (next < s.size() && (static_cast<unsigned char>(s[next]) & 0xC0) == 0x80) ++next;
+              const auto candidate = prefix + s.substr(pos, next - pos);
+              if (text_width(font, candidate) > width) break;
+              prefix = candidate;
+              pos = next;
+            }
+            if (pos == s.size()) return prefix;
+            while (!prefix.empty() && text_width(font, prefix + "...") > width) pop_utf8(prefix);
+            return text_width(font, "...") <= width ? prefix + "..." : "";
+          };
+          auto wrap_text = [&](display::BaseFont *font, const std::string &text, int width, size_t limit) {
+            std::vector<std::string> lines;
+            lines.reserve(limit);
+            size_t pos = 0;
+            auto space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+            while (pos < text.size() && lines.size() < limit) {
+              while (pos < text.size() && space(text[pos])) ++pos;
+              if (pos == text.size()) break;
+              const size_t start = pos;
+              size_t end = start, last_space = std::string::npos;
+              while (end < text.size() && text[end] != '\n' && text[end] != '\r') {
+                size_t next = end + 1;
+                while (next < text.size() && (static_cast<unsigned char>(text[next]) & 0xC0) == 0x80) ++next;
+                const std::string candidate = text.substr(start, next - start);
+                if (text_width(font, candidate) > width) break;
+                if (text[end] == ' ' || text[end] == '\t') last_space = end;
+                end = next;
+              }
+              if (end == start) {
+                // Even an oversized/unsupported glyph must make forward progress.
+                pos = end + 1;
+                while (pos < text.size() && (static_cast<unsigned char>(text[pos]) & 0xC0) == 0x80) ++pos;
+                lines.emplace_back("?");
+                continue;
+              }
+              const bool soft_break = end < text.size() && text[end] != '\n' && text[end] != '\r';
+              if (soft_break && last_space != std::string::npos && last_space > start) end = last_space;
+              std::string line = text.substr(start, end - start);
+              while (!line.empty() && space(line.back())) line.pop_back();
+              pos = end;
+              while (pos < text.size() && space(text[pos])) ++pos;
+              if (lines.size() + 1 == limit && pos < text.size()) {
+                while (!line.empty() && text_width(font, line + "...") > width) pop_utf8(line);
+                line += "...";
+              }
+              lines.push_back(line);
+            }
+            return lines;
+          };
+          // UI_TEXT_HELPERS_END
+          
+          // Small outline pictograms made from display primitives (no bitmap downloads).
+          // 0 Wi-Fi, 1 home, 2 mic, 3 listening, 4 thinking, 5 speaker, 6 radio, 7 mic off.
+          auto icon = [&](int kind, int x, int y, int size, Color color) {
+            auto line = [&](int x1, int y1, int x2, int y2) {
+              it.line(x + x1 * size / 16, y + y1 * size / 16,
+                      x + x2 * size / 16, y + y2 * size / 16, color);
+            };
+            if (kind == 0) {
+              line(1, 5, 4, 3); line(4, 3, 12, 3); line(12, 3, 15, 5);
+              line(3, 8, 6, 6); line(6, 6, 10, 6); line(10, 6, 13, 8);
+              line(6, 10, 8, 9); line(8, 9, 10, 10); line(8, 12, 8, 13);
+            } else if (kind == 1) {
+              line(1, 7, 8, 1); line(8, 1, 15, 7); line(3, 6, 3, 14);
+              line(3, 14, 13, 14); line(13, 14, 13, 6);
+              line(6, 14, 6, 9); line(6, 9, 10, 9); line(10, 9, 10, 14);
+            } else if (kind == 2 || kind == 7) {
+              line(6, 1, 10, 1); line(6, 1, 5, 3); line(10, 1, 11, 3);
+              line(5, 3, 5, 8); line(11, 3, 11, 8); line(5, 8, 6, 10);
+              line(6, 10, 10, 10); line(10, 10, 11, 8);
+              line(2, 6, 2, 9); line(2, 9, 5, 12); line(5, 12, 11, 12);
+              line(11, 12, 14, 9); line(14, 9, 14, 6);
+              line(8, 12, 8, 15); line(5, 15, 11, 15);
+              if (kind == 7) line(0, 0, 16, 16);
+            } else if (kind == 3) {
+              line(2, 6, 2, 10); line(5, 3, 5, 13); line(8, 1, 8, 15);
+              line(11, 4, 11, 12); line(14, 6, 14, 10);
+            } else if (kind == 4) {
+              for (int cx = 3; cx <= 13; cx += 5) it.filled_circle(x + cx * size / 16, y + size / 2, 1, color);
+            } else if (kind == 5) {
+              line(1, 6, 4, 6); line(4, 6, 8, 2); line(8, 2, 8, 14);
+              line(8, 14, 4, 10); line(4, 10, 1, 10); line(1, 10, 1, 6);
+              line(11, 5, 13, 8); line(13, 8, 11, 11);
+              line(13, 2, 16, 8); line(16, 8, 13, 14);
+            } else {
+              line(2, 5, 14, 5); line(14, 5, 14, 14); line(14, 14, 2, 14); line(2, 14, 2, 5);
+              line(3, 5, 12, 1); line(5, 8, 5, 11); line(4, 9, 6, 9);
+              line(9, 8, 12, 8); line(9, 11, 12, 11);
+            }
+          };
+          auto header = [&](const std::string &label, int symbol) {
+            icon(symbol, 16, 12, 16, accent);
+            const auto text = fit_text(id(ma_font_status), label, w - 60);
+            it.print(42, 11, id(ma_font_status), accent, TextAlign::TOP_LEFT, text.c_str());
+          };
+          auto title = [&](const std::string &text, int y = 112) {
+            display::BaseFont *font = id(ui_font_primary);
+            if (text_width(font, text) > w - 32) font = id(ma_font_heading);
+            const auto fitted = fit_text(font, text, w - 32);
+            it.print(16, y, font, ink, TextAlign::TOP_LEFT, fitted.c_str());
+          };
+          auto subtitle = [&](const std::string &text, int y = 150) {
+            const auto fitted = fit_text(id(font_response), text, w - 32);
+            it.print(16, y, id(font_response), secondary, TextAlign::TOP_LEFT, fitted.c_str());
+          };
+          
+          if (connecting) {
+            const bool wifi_ok = wifi::global_wifi_component->is_connected();
+            header(id(ble_provisioning_active) ? "WI-FI SETUP" : "CONNECTION", wifi_ok ? 1 : 0);
+            icon(wifi_ok ? 1 : 0, 16, 72, 24, accent);
+            if (id(ble_provisioning_active)) {
+              const auto state = id(radio_improv).get_improv_state();
+              title(wifi_ok ? "Finishing setup..." : state == improv::STATE_PROVISIONING ?
+                    "Connecting to Wi-Fi" : state == improv::STATE_AUTHORIZED ? "Ready for Home Assistant" : "Starting Bluetooth...");
+              subtitle("Improv BLE / USB / Wi-Fi AP");
+              subtitle("Audio starts after setup", 175);
+            } else {
+              title(wifi_ok ? "Home Assistant" : "Connecting to Wi-Fi");
+              subtitle(wifi_ok ? "Connecting to Assist..." : "Joining your network...");
+            }
+          } else if (music) {
+            // Keep the validated radio/track metadata selection, including absent fields.
+            const std::string track = valid(id(ma_media_title).state) ? id(ma_media_title).state : "";
+            const std::string artist = valid(id(ma_media_artist).state) ? id(ma_media_artist).state : "";
+            const std::string album = valid(id(ma_media_album).state) ? id(ma_media_album).state : "";
+            const float duration_ms = id(ma_media_duration).state;
+            const bool is_radio = !std::isfinite(duration_ms) || duration_ms <= 500.0f;
+            std::string main_text, sub, detail, heading = "MUSIC ASSISTANT";
+            if (is_radio) {
+              main_text = album.empty() ? track : album;
+              sub = album.empty() || track == album ? "" : track;
+              detail = artist;
+            } else {
+              heading = album.empty() ? heading : album;
+              main_text = artist.empty() ? track : artist;
+              sub = artist.empty() ? "" : track;
+              const int seconds = int(duration_ms / 1000.0f + 0.5f);
+              char duration[24];
+              snprintf(duration, sizeof(duration), "%d:%02d", seconds / 60, seconds % 60);
+              detail = duration;
+            }
+            header(heading, 6);
+            display::BaseFont *font = id(ma_font_station);
+            if (text_width(font, main_text) > w - 32) font = id(ma_font_heading);
+            main_text = fit_text(font, main_text, w - 32);
+            it.print(16, 78, font, ink, TextAlign::TOP_LEFT, main_text.c_str());
+            sub = fit_text(id(ma_font_metadata), sub, w - 32);
+            it.print(16, 121, id(ma_font_metadata), secondary, TextAlign::TOP_LEFT, sub.c_str());
+            subtitle(detail, 151);
+          } else if (page == id(answeringP)) {
+            header("ANSWERING", 5);
+            const auto question = valid(id(text_request).state) ? fit_text(id(font_request), id(text_request).state, w - 32) : "";
+            it.print(16, 48, id(font_request), secondary, TextAlign::TOP_LEFT, question.c_str());
+            const auto response = valid(id(text_response).state) ? id(text_response).state : "";
+            const auto lines = wrap_text(id(font_response), response, w - 32, 6);
+            // Fixed 20px line spacing leaves the bottom status strip completely free.
+            it.start_clipping(16, 72, w - 16, h - 43);
+            for (size_t i = 0; i < lines.size(); ++i) {
+              it.print(16, 73 + int(i) * 20, id(font_response), ink, TextAlign::TOP_LEFT, lines[i].c_str());
+            }
+            it.end_clipping();
+          } else if (page == id(listeningP)) {
+            const bool thinking = id(ui_thinking);
+            header(thinking ? "THINKING" : "LISTENING", thinking ? 4 : 2);
+            icon(thinking ? 4 : 3, 16, 72, 24, accent);
+            if (thinking) {
+              if (valid(id(text_request).state)) subtitle(id(text_request).state, 110);
+              title("One moment...", 144);
+            } else {
+              it.print(16, 110, id(ma_font_station), ink, TextAlign::TOP_LEFT, "I'm listening");
+              subtitle("Go ahead...", 154);
+            }
+          } else if (page == id(muteMicP)) {
+            header("VOICE ASSIST", 7);
+            icon(7, 16, 72, 24, id(ui_warning));
+            title("Microphone off");
+            subtitle("Wake word unavailable");
+          } else if (page == id(presetP)) {
+            header("RADIO PRESETS", 6);
+            const auto lines = wrap_text(id(ma_font_heading), id(preset_message), w - 32, 3);
+            for (size_t i = 0; i < lines.size(); ++i)
+              it.print(16, 84 + int(i) * 29, id(ma_font_heading), ink, TextAlign::TOP_LEFT, lines[i].c_str());
+          } else if (page == id(waitingBP)) {
+            header("VOICE AUDIO", 5);
+            icon(5, 16, 72, 24, accent);
+            title("Playing audio");
+          } else {
+            header("VOICE ASSIST", 2);
+            icon(2, 16, 72, 24, accent);
+            std::string wake_word;
+            int enabled = 0;
+            for (auto *model : {id(okay_nabu), id(hey_jarvis), id(hey_mycroft)}) {
+              if (model->is_enabled()) { wake_word = model->get_wake_word(); ++enabled; }
+            }
+            title(enabled == 1 ? "Say \"" + wake_word + "\"" : enabled > 1 ? "Ready for wake word" : "Press Assist");
+            if (enabled > 0) subtitle("or press Assist");
+          }
+          
+          // Persistent footer: show the selected logical volume, not the temporary
+          // hardware mute during listening. Never write volume/codec state from drawing.
+          it.line(16, h - 42, w - 16, h - 42, id(ui_separator));
+          if (connecting) {
+            it.print(16, h - 28, id(ma_font_status), secondary, TextAlign::TOP_LEFT,
+                     wifi::global_wifi_component->is_connected() ? "WI-FI CONNECTED" : "WI-FI CONNECTING");
+          } else {
+            const bool show_music = music || (page == id(presetP) && id(music_active) && !id(assist_return_to_ma));
+            const float volume = show_music ? id(sendspin_media_player).volume : id(Vol);
+            const bool muted = show_music ? id(sendspin_media_player).is_muted() :
+                id(speaker_media_player).is_muted() || (id(mute) && !id(auto_mute_active));
+            const bool known = std::isfinite(volume);
+            const int percent = known ? int(clamp(volume, 0.0f, 1.0f) * 100 + 0.5f) : 0;
+            char label[32];
+            const char *source = show_music ? "MUSIC" : "VOICE";
+            if (muted) snprintf(label, sizeof(label), "%s MUTED", source);
+            else if (known) snprintf(label, sizeof(label), "%s %d%%", source, percent);
+            else snprintf(label, sizeof(label), "%s --", source);
+            it.print(16, h - 28, id(ma_font_status), ink, TextAlign::TOP_LEFT, label);
+            const int bar_x = 16 + text_width(id(ma_font_status), label) + 9;
+            const int bar_width = w - 96 - bar_x;
+            if (bar_width > 0) {
+              it.filled_rectangle(bar_x, h - 21, bar_width, 5, id(ui_track));
+              const int fill = muted || !known ? 0 : bar_width * percent / 100;
+              if (fill > 0) it.filled_rectangle(bar_x, h - 21, fill, 5, id(ui_fill));
+            }
+          }
+          const float battery = id(battery_percent).state;
+          const int bx = w - 84, by = h - 26;
+          it.rectangle(bx, by, 18, 11, ink);
+          it.filled_rectangle(bx + 18, by + 3, 2, 5, ink);
+          const bool battery_known = id(battery_percent).has_state() && std::isfinite(battery);
+          if (battery_known) {
+            const int percent = int(clamp(battery, 0.0f, 100.0f) + 0.5f);
+            const int fill = 14 * percent / 100;
+            const Color color = percent < 20 ? id(ui_warning) : id(ui_fill);
+            if (fill > 0) it.filled_rectangle(bx + 2, by + 2, fill, 7, color);
+            it.printf(w - 16, h - 28, id(ma_font_status), ink, TextAlign::TOP_RIGHT, "%d%%", percent);
+          } else {
+            it.print(w - 16, h - 28, id(ma_font_status), secondary, TextAlign::TOP_RIGHT, "--%");
+          }
+          if (id(usb_power_detect).state) {
+            // A small + above the battery retains the charging indication without crowding.
+            it.line(bx + 6, by - 4, bx + 12, by - 4, ink);
+            it.line(bx + 9, by - 7, bx + 9, by - 1, ink);
+          }
+
+  - id: ble_finish_wifi_setup
+    mode: single
+    then:
+      # Improv keeps its completion result available for 10 seconds.
+      # Also covers provisioning through USB or the fallback access point.
+      - delay: 12s
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - script.stop: ble_finish_wifi_setup
+      - lambda: id(radio_improv).stop();
+      - ble.disable:
+          id: radio_ble
+      - wait_until:
+          condition:
+            lambda: |-
+              return esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE &&
+                  esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED;
+          timeout: 10s
+      - if:
+          condition:
+            lambda: |-
+              return esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE ||
+                  esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED;
+          then:
+            - logger.log:
+                level: ERROR
+                format: "BLE shutdown not confirmed; audio remains held"
+            - script.stop: ble_finish_wifi_setup
+      - lambda: |-
+          id(radio_improv).disable_loop();
+          id(ble_provisioning_active) = false;
+          api::global_api_server->enable_loop();
+          id(sendspin_hub).enable_loop();
+          ESP_LOGI("radio_ble", "BLE stopped; audio released; internal free=%u largest=%u",
+                   unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                   unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+      # wait_for_wifi_ready now resumes the existing idle/wake-word workflow.
   - id: show_preset_feedback
     mode: restart
     then:
@@ -2346,7 +2027,6 @@ script:
           }
       - delay: 2500ms
       - script.execute: reset_display
-
   - id: play_radio_preset
     mode: restart
     parameters:
@@ -2362,9 +2042,8 @@ script:
                   media_content_type: radio
                   enqueue: replace
                 data_template:
-                  entity_id: >-
-                    {% set configured = player_entity | trim %}
-                    {% if configured and states(configured) not in ['unknown', 'unavailable']
+                  entity_id: |-
+                    {% set configured = player_entity | trim %} {% if configured and states(configured) not in ['unknown', 'unavailable']
                           and state_attr(configured, 'mass_player_type') is not none %}
                       {{ configured }}
                     {% else %}
@@ -2378,19 +2057,20 @@ script:
                       {% endfor %}
                       {{ ns.entity_id }}
                     {% endif %}
-                  media_content_id: "{{ station_name }}"
+                  media_content_id: '{{ station_name }}'
                 variables:
-                  station_name: !lambda return station;
-                  player_entity: !lambda return id(ma_player_entity_id);
+                  station_name: !lambda |-
+                    return station;
+                  player_entity: !lambda |-
+                    return id(ma_player_entity_id);
                 on_error:
                   - lambda: |-
                       id(preset_message) = "PLAY FAILED";
                       ESP_LOGW("radio_preset", "Unable to play station: %s", error.c_str());
                   - script.execute: show_preset_feedback
           else:
-            - lambda: 'id(preset_message) = "NO RADIO";'
+            - lambda: id(preset_message) = "NO RADIO";
             - script.execute: show_preset_feedback
-
   - id: save_radio_preset
     mode: restart
     parameters:
@@ -2399,13 +2079,11 @@ script:
       - light.turn_on:
           id: screen_backlight
           brightness: 100%
-      # Read the currently playing MA queue to save its exact station URI.
       - homeassistant.action:
           action: music_assistant.get_queue
           data_template:
-            entity_id: >-
-              {% set configured = player_entity | trim %}
-              {% if configured and states(configured) not in ['unknown', 'unavailable']
+            entity_id: |-
+              {% set configured = player_entity | trim %} {% if configured and states(configured) not in ['unknown', 'unavailable']
                     and state_attr(configured, 'mass_player_type') is not none %}
                 {{ configured }}
               {% else %}
@@ -2429,12 +2107,14 @@ script:
                 {{ ns.named if ns.named else ns.metadata }}
               {% endif %}
           variables:
-            player_entity: !lambda return id(ma_player_entity_id);
-            current_title: !lambda return id(ma_media_title).state;
-            current_album: !lambda return id(ma_media_album).state;
+            player_entity: !lambda |-
+              return id(ma_player_entity_id);
+            current_title: !lambda |-
+              return id(ma_media_title).state;
+            current_album: !lambda |-
+              return id(ma_media_album).state;
           capture_response: true
-          response_template: >-
-            {% set entity_id = response.keys() | list | first | default('') %}{% set item = response[entity_id].get('current_item') if entity_id else none %}{% set media_item = item.get('media_item') if item else none %}{% set uri = state_attr(entity_id, 'media_content_id') or (media_item.get('uri', '') if media_item else '') %}{{ entity_id }}|@|{{ uri }}
+          response_template: '{% set entity_id = response.keys() | list | first | default('''') %}{% set item = response[entity_id].get(''current_item'') if entity_id else none %}{% set media_item = item.get(''media_item'') if item else none %}{% set uri = state_attr(entity_id, ''media_content_id'') or (media_item.get(''uri'', '''') if media_item else '''') %}{{ entity_id }}|@|{{ uri }}'
           on_success:
             - lambda: |-
                 const std::string payload = response["response"].as<std::string>();
@@ -2476,40 +2156,55 @@ script:
                 id(preset_message) = "NO RADIO";
                 ESP_LOGW("radio_preset", "Unable to read MA queue: %s", error.c_str());
             - script.execute: show_preset_feedback
-
   - id: schedule_music_refresh
     mode: restart
     then:
       - delay: 200ms
       - if:
           condition:
-            lambda: 'return id(music_active) && !id(assist_return_to_ma) && id(myDisplay).is_ready();'
+            lambda: return id(music_active) && !id(assist_return_to_ma) && id(myDisplay).is_ready();
           then:
             - component.update: myDisplay
-
   - id: temporary_assist
     mode: single
     then:
+      - script.execute:
+          id: assist_trace
+          event: !lambda |-
+            return id(assist_return_to_ma) ? "Control cancels MA Assist" :
+                id(aec_pending_wake_word).empty() ? "Control starts MA Assist" : "Wake word starts MA Assist";
+      - if:
+          condition:
+            lambda: return id(ble_provisioning_active);
+          then:
+            - script.execute: reset_display
+            - script.stop: temporary_assist
       - if:
           condition:
             not:
               voice_assistant.connected:
           then:
-            - lambda: 'id(preset_message) = "HA OFFLINE";'
+            - lambda: |-
+                id(aec_pending_wake_word).clear();
+                id(preset_message) = "HA OFFLINE";
             - script.execute: show_preset_feedback
+            - script.execute: aec_rearm_wake_word
             - script.stop: temporary_assist
       - if:
           condition:
-            lambda: 'return id(assist_return_to_ma);'
+            lambda: return id(assist_return_to_ma);
           then:
             - voice_assistant.stop:
+            - media_player.stop:
+                id: speaker_media_player
+                announcement: true
+            - script.execute: finish_temporary_assist
           else:
             - lambda: |-
                 id(assist_return_to_ma) = true;
                 id(assist_left_ma_group) = false;
                 id(phase) = 3;
-            # Pause the entire Sendspin group so nearby players do not mask
-            # the user's voice. The Radio's shared I2S bus must then stop.
+            - micro_wake_word.stop:
             - media_player.pause: sendspin_media_player
             - wait_until:
                 condition:
@@ -2517,242 +2212,216 @@ script:
                     return id(sendspin_media_player).state !=
                         media_player::MEDIA_PLAYER_STATE_PLAYING;
                 timeout: 8s
+            - delay: 750ms
             - if:
                 condition:
-                  lambda: |-
-                    return id(sendspin_media_player).state ==
-                        media_player::MEDIA_PLAYER_STATE_PLAYING;
+                  and:
+                    - voice_assistant.connected:
+                    - lambda: |-
+                        return !id(mic_muted) &&
+                            id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING;
                 then:
                   - logger.log:
-                      level: ERROR
-                      format: "Assist cancelled: Sendspin group did not pause"
-                  - lambda: 'id(assist_return_to_ma) = false;'
+                      level: INFO
+                      format: MA group paused; starting Assist on duplex I2S
+                  - light.turn_on: screen_backlight
                   - script.execute: reset_display
+                  - voice_assistant.start:
+                      wake_word: !lambda |-
+                        return id(aec_pending_wake_word);
+                      silence_detection: true
+                  - lambda: id(aec_pending_wake_word).clear();
                 else:
-                  - wait_until:
-                      condition:
-                        lambda: |-
-                          return !id(music_active) &&
-                              id(radio_speaker).is_stopped();
-                      timeout: 6s
-                  - if:
-                      condition:
-                        lambda: |-
-                          return id(music_active) ||
-                              !id(radio_speaker).is_stopped();
-                      then:
-                        # If MA paused the group but the local output has not
-                        # drained, release only this Radio's I2S bus as a
-                        # fallback. SWITCH will rejoin it after Assist.
-                        - lambda: 'id(assist_left_ma_group) = true;'
-                        - media_player.stop: music_source_player
-                        - wait_until:
-                            condition:
-                              lambda: |-
-                                return !id(music_active) &&
-                                    id(radio_speaker).is_stopped();
-                            timeout: 6s
-                  - if:
-                      condition:
-                        lambda: |-
-                          return id(music_active) ||
-                              !id(radio_speaker).is_stopped();
-                      then:
-                        - logger.log:
-                            level: ERROR
-                            format: "Assist cancelled: Radio did not release the I2S bus"
-                        - lambda: 'id(assist_return_to_ma) = false;'
-                        - if:
-                            condition:
-                              lambda: 'return id(assist_left_ma_group);'
-                            then:
-                              - sendspin.switch: sendspin_hub
-                        - media_player.play: sendspin_media_player
-                        - script.execute: reset_display
-                      else:
-                        - light.turn_on: screen_backlight
-                        - script.execute: reset_display
-                        - voice_assistant.start:
-                            silence_detection: true
-
+                  - logger.log:
+                      level: WARN
+                      format: 'AEC Assist cancelled: group pause, HA connection or microphone unavailable'
+                  - script.execute: finish_temporary_assist
   - id: finish_temporary_assist
     mode: single
     then:
+      - script.execute:
+          id: assist_trace
+          event: MA return requested
       - wait_until:
           condition:
-            not:
-              voice_assistant.is_running:
-          timeout: 10s
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing: speaker_media_player
+          timeout: 15s
       - if:
           condition:
-            lambda: 'return id(assist_return_to_ma);'
+            or:
+              - voice_assistant.is_running:
+              - media_player.is_announcing: speaker_media_player
           then:
-            - lambda: |-
-                id(assist_return_to_ma) = false;
-                id(phase) = 1;
-            # Release the microphone bus before Sendspin can restart I2S.
-            - micro_wake_word.stop:
-            - wait_until:
-                condition:
-                  not:
-                    micro_wake_word.is_running:
-                timeout: 3s
-            - delay: 200ms
-            - if:
-                condition:
-                  lambda: 'return id(assist_left_ma_group);'
-                then:
-                  - sendspin.switch: sendspin_hub
-                  - delay: 300ms
+            - logger.log:
+                level: WARN
+                format: AEC music return still waiting for Assist/announcement completion
+            - script.stop: finish_temporary_assist
+      - if:
+          condition:
+            lambda: return id(assist_return_to_ma);
+          then:
+            - script.execute:
+                id: assist_trace
+                event: Resuming MA playback
             - media_player.play: sendspin_media_player
             - wait_until:
                 condition:
-                  lambda: 'return id(music_active);'
+                  lambda: |-
+                    return id(music_active) ||
+                        id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING;
                 timeout: 8s
-            - lambda: 'id(assist_left_ma_group) = false;'
+            - delay: 750ms
+            - lambda: |-
+                id(assist_return_to_ma) = false;
+                id(assist_left_ma_group) = false;
+                id(aec_pending_wake_word).clear();
+            - script.execute: update_playback_mode
+            - script.execute: aec_rearm_wake_word
             - script.execute: reset_display
-
   - id: go_assist
     then:
-        - if:
-            condition:
-              not:
-                voice_assistant.connected:
-            then:
-              - lambda: 'id(preset_message) = "HA OFFLINE";'
-              - script.execute: show_preset_feedback
-              - script.stop: go_assist
-        - light.turn_on: screen_backlight
-        - lambda: |-
-            id(lightTO) = 0;
-        - if:
-            condition:
-              lambda: 'return(id(phase) == 3 || id(phase) == 4);'
-            then:
-              - if:
-                  condition:
-                    voice_assistant.is_running:
-                  then:
-                    - voice_assistant.stop:
-                    - wait_until:
-                        not:
-                          voice_assistant.is_running:
-              - if:
-                  condition:
-                    media_player.is_announcing:
+      - if:
+          condition:
+            lambda: return id(ble_provisioning_active);
+          then:
+            - script.execute: reset_display
+            - script.stop: go_assist
+      - if:
+          condition:
+            not:
+              voice_assistant.connected:
+          then:
+            - lambda: id(preset_message) = "HA OFFLINE";
+            - script.execute: show_preset_feedback
+            - script.stop: go_assist
+      - light.turn_on: screen_backlight
+      - lambda: id(lightTO) = 0;
+      - if:
+          condition:
+            lambda: return(id(phase) == 3 || id(phase) == 4);
+          then:
+            - if:
+                condition:
+                  voice_assistant.is_running:
+                then:
+                  - voice_assistant.stop:
+                  - wait_until:
+                      not:
+                        voice_assistant.is_running:
+            - if:
+                condition:
+                  media_player.is_announcing:
+                    id: speaker_media_player
+                then:
+                  - media_player.stop:
                       id: speaker_media_player
-                  then:
-                    - media_player.stop:
-                        id: speaker_media_player
-                        announcement: true
-              - if:
-                  condition:
-                    media_player.is_playing:
+                      announcement: true
+            - if:
+                condition:
+                  media_player.is_playing:
+                    id: speaker_media_player
+                then:
+                  - media_player.stop:
                       id: speaker_media_player
-                  then:
-                    - media_player.stop:
-                        id: speaker_media_player
-              - micro_wake_word.start:
-              - lambda: |-
-                  id(mute) = false;
-                  id(auto_mute_active) = false;
-                  id(phase) = 1;
-              - script.execute: reset_display
-            else:
-              - if:
-                  condition:
-                    media_player.is_announcing:
+            - micro_wake_word.start:
+            - lambda: |-
+                id(mute) = false;
+                id(auto_mute_active) = false;
+                id(phase) = 1;
+            - script.execute: reset_display
+          else:
+            - if:
+                condition:
+                  media_player.is_announcing:
+                    id: speaker_media_player
+                then:
+                  - media_player.stop:
                       id: speaker_media_player
-                  then:
-                    - media_player.stop:
-                        id: speaker_media_player
-                        announcement: true
-              - if:
-                  condition:
-                    media_player.is_playing:
+                      announcement: true
+            - if:
+                condition:
+                  media_player.is_playing:
+                    id: speaker_media_player
+                then:
+                  - media_player.stop:
                       id: speaker_media_player
-                  then:
-                    - media_player.stop:
-                        id: speaker_media_player
-              - if:
-                  condition:
-                    voice_assistant.is_running:
-                  then:
-                    - voice_assistant.stop:
-                    - wait_until:
-                        not:
-                          voice_assistant.is_running:
-              - micro_wake_word.stop:
-              - lambda: |-
-                  id(phase) = 3;
-              - script.execute: reset_display
-              - voice_assistant.start:
-
+            - if:
+                condition:
+                  voice_assistant.is_running:
+                then:
+                  - voice_assistant.stop:
+                  - wait_until:
+                      not:
+                        voice_assistant.is_running:
+            - micro_wake_word.stop:
+            - lambda: id(phase) = 3;
+            - script.execute: reset_display
+            - voice_assistant.start:
   - id: mute_unmute
     then:
-        - light.turn_on: screen_backlight
-        - lambda: |-
-            id(lightTO) = 0;
-        - if:
-            condition:
-              lambda: |-
-                return !id(assist_return_to_ma) &&
-                    (id(music_active) ||
-                     id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING);
-            then:
-              # The Sendspin media player controls mute for every member of
-              # the current Music Assistant group, not only this Radio.
-              - if:
-                  condition:
-                    media_player.is_muted: sendspin_media_player
-                  then:
-                    - media_player.unmute: sendspin_media_player
-                  else:
-                    - media_player.mute: sendspin_media_player
-              - script.execute: schedule_music_refresh
-            else:
-              - if:
-                  condition:
-                    lambda: 'return id(mute);'
-                  then:
-                    - logger.log: "unmute!"
-                    - script.execute: apply_local_codec_volume
-                    - media_player.volume_set:
-                        id: speaker_media_player
-                        volume: !lambda 'return id(Vol);'
-                    - lambda: id(mute) = false;
-                    - lambda: id(auto_mute_active) = false;
-                  else:
-                    - logger.log: "mute!"
-                    - media_player.volume_set:
-                        id: speaker_media_player
-                        volume: '0'
-                    - lambda: id(mute) = true;
-                    - lambda: id(auto_mute_active) = false;
-        - lambda: |-
-            id(volume_display_active) = true;
-            id(volume_display_timer) = 0;
-        - script.execute: schedule_volume_update
-        - script.execute: reset_display    
-
+      - script.execute: stop_ui_cue
+      - light.turn_on: screen_backlight
+      - lambda: id(lightTO) = 0;
+      - if:
+          condition:
+            lambda: |-
+              return !id(assist_return_to_ma) &&
+                  (id(music_active) ||
+                   id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING);
+          then:
+            - if:
+                condition:
+                  media_player.is_muted: sendspin_media_player
+                then:
+                  - media_player.unmute: sendspin_media_player
+                else:
+                  - media_player.mute: sendspin_media_player
+            - script.execute: schedule_music_refresh
+          else:
+            - if:
+                condition:
+                  lambda: return id(mute);
+                then:
+                  - logger.log: unmute!
+                  - script.execute: apply_local_codec_volume
+                  - media_player.volume_set:
+                      id: speaker_media_player
+                      volume: !lambda |-
+                        return id(Vol);
+                  - lambda: id(mute) = false;
+                  - lambda: id(auto_mute_active) = false;
+                else:
+                  - logger.log: mute!
+                  - media_player.volume_set:
+                      id: speaker_media_player
+                      volume: '0'
+                  - lambda: id(mute) = true;
+                  - lambda: id(auto_mute_active) = false;
+      - lambda: |-
+          id(volume_display_active) = true;
+          id(volume_display_timer) = 0;
+      - script.execute: schedule_volume_update
+      - script.execute: reset_display
   - id: jack_detect_high
     then:
-       - logger.log: "Jack detect high -> route to speaker"
-       - output.turn_off: dac_mute
-       - lambda: |-
-           id(my_es8388).write_byte(0x1D, 0x20);
-           id(my_es8388).write_byte(0x1C, 0x10);
-           id(my_es8388).write_byte(0x04, 0x30);
-
+      - logger.log: Jack detect high -> route to speaker
+      - output.turn_off: dac_mute
+      - lambda: |-
+          id(my_es8388).write_byte(0x1D, 0x20);
+          id(my_es8388).write_byte(0x1C, 0x10);
+          id(my_es8388).write_byte(0x04, 0x30);
   - id: jack_detect_low
     then:
-       - logger.log: "Jack detect low -> route to line out"
-       - output.turn_on: dac_mute
-       - lambda: |-
-           id(my_es8388).write_byte(0x1D, 0x00);
-           id(my_es8388).write_byte(0x1C, 0x00);
-           id(my_es8388).write_byte(0x04, 0x0C);
-
+      - logger.log: Jack detect low -> route to line out
+      - output.turn_on: dac_mute
+      - lambda: |-
+          id(my_es8388).write_byte(0x1D, 0x00);
+          id(my_es8388).write_byte(0x1C, 0x00);
+          id(my_es8388).write_byte(0x04, 0x0C);
   - id: adjust_volume
     parameters:
       delta: float
@@ -2765,8 +2434,6 @@ script:
                   (id(music_active) ||
                    id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING);
           then:
-            # Start from MA's reported volume, but accumulate rapid encoder
-            # events locally while the server's acknowledgement is in flight.
             - media_player.volume_set:
                 id: sendspin_media_player
                 volume: !lambda |-
@@ -2791,13 +2458,13 @@ script:
                   id(ma_volume_last_command_ms) = now;
                   return next / 100.0f;
             - media_player.unmute: sendspin_media_player
-            - lambda: 'id(lightTO) = 0;'
+            - lambda: id(lightTO) = 0;
             - script.execute: schedule_music_refresh
             - script.stop: adjust_volume
       - lambda: |-
           id(lightTO) = 0;          
           float scale = 1.0f;
-          
+
           if(id(Vol) <= 0.20f) scale = 0.20f;
           else if(id(Vol) < 0.3f) scale = 0.50f;
           else if(id(Vol) < 0.5f) scale = 0.60f;
@@ -2814,19 +2481,16 @@ script:
       - script.execute: apply_local_codec_volume
       - media_player.volume_set:
           id: speaker_media_player
-          volume: !lambda return id(Vol);
+          volume: !lambda |-
+            return id(Vol);
       - script.execute: schedule_volume_update
       - script.execute: reset_display
-
   - id: schedule_volume_update
-#    mode: restart
     then:
-#      - delay: 400ms
       - lambda: |-
           if (id(volume_display_active) && id(myDisplay).is_ready()) {
             id(myDisplay).update();
           }
-
   - id: apply_local_codec_volume
     then:
       - lambda: |-
@@ -2835,242 +2499,403 @@ script:
           for (uint8_t reg = 0x2E; reg <= 0x31; reg++) {
             id(my_es8388).write_byte(reg, codec_volume);
           }
-
+  - id: refresh_assist_waiting_display
+    then:
+      - lambda: |-
+          // Display only: never run waiting/reset_display (they also mute audio).
+          // Leave music, listening, answers, feedback and backlight timeout alone.
+          if (id(myDisplay).is_ready() && id(myDisplay).get_active_page() == id(waitingP)) {
+            id(myDisplay).update();
+          }
   - id: reset_display
-#    mode: restart
-    then: 
-       - logger.log: "===> reset_display" 
-       - lambda: |-
-            id(lightTO) = 0;
-            if ((id(music_active) ||
-                 id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING) &&
-                !id(assist_return_to_ma)) {
-              id(myDisplay).show_page(musicP);
-              id(myDisplay).update();
-              return;
-            }
-            if (id(mic_muted)) {
-              id(myDisplay).show_page(muteMicP);
-              id(myDisplay).update();
-              return;
-            }
+    then:
+      - logger.log: ===> reset_display
+      - lambda: |-
+          id(lightTO) = 0;
+          if (id(ble_provisioning_active)) {
+            id(myDisplay).show_page(wifiWaitingP);
+            id(myDisplay).update();
+            if (!id(wait_for_wifi_ready).is_running()) id(wait_for_wifi_ready).execute();
+            return;
+          }
+          if ((id(music_active) ||
+               id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING) &&
+              !id(assist_return_to_ma)) {
+            id(myDisplay).show_page(musicP);
+            id(myDisplay).update();
+            return;
+          }
+          if (id(mic_muted)) {
+            id(myDisplay).show_page(muteMicP);
+            id(myDisplay).update();
+            return;
+          }
 
-            if ((id(phase) == 0) && (!id(logo).is_running())) {
-              id(logo).execute();
-            } else if (id(phase) == 1) {
-              id(waiting).execute();
-            } else if (id(phase) == 2) {
-              id(external_player).execute();
-            } else if (id(phase) == 3) {
-              id(listening).execute();
-            } else if (id(phase) == 4) {
-              id(answering).execute();
-            }
-
+          if ((id(phase) == 0) && (!id(logo).is_running())) {
+            id(logo).execute();
+          } else if (id(phase) == 1) {
+            id(waiting).execute();
+          } else if (id(phase) == 2) {
+            id(external_player).execute();
+          } else if (id(phase) == 3) {
+            id(listening).execute();
+          } else if (id(phase) == 4) {
+            id(answering).execute();
+          }
   - id: logo
     then:
-       - logger.log: "===> logo"
-       - media_player.speaker.play_on_device_media_file:
-           id: speaker_media_player
-           media_file: little_sound
-           announcement: false
-       - lambda: |-
-           id(myDisplay).show_page(logoP);
-           id(myDisplay).update();
-           id(lightTO) = 0;
-       - light.turn_on: screen_backlight
-       - delay: 8sec
-       - script.execute: wait_for_wifi_ready
-
+      - logger.log: ===> logo
+      - if:
+          condition:
+            lambda: return id(ble_provisioning_active);
+          then:
+            - script.execute: wait_for_wifi_ready
+            - script.stop: logo
+      # The startup melody is now played only when Wi-Fi AND HA voice are ready.
+      - lambda: |-
+          id(myDisplay).show_page(logoP);
+          id(myDisplay).update();
+          id(lightTO) = 0;
+      - light.turn_on: screen_backlight
+      - delay: 8sec
+      - script.execute: wait_for_wifi_ready
   - id: wait_for_wifi_ready
     mode: restart
     then:
-       - logger.log: "Waiting for WiFi before entering waiting state"
-       - while:
-           condition:
-             not:
-               wifi.connected:
-           then:
-             - lambda: |-
-                 id(myDisplay).show_page(wifiWaitingP);
-                 id(myDisplay).update();
-                 id(lightTO) = 0;
-             - light.turn_on: screen_backlight
-             - delay: 1s
-       - logger.log: "WiFi connected, moving to waiting state"
-       - lambda: 'id(phase) = 1;'
-       - script.execute: reset_display
-
+      - logger.log: Waiting for WiFi and BLE shutdown before audio
+      - while:
+          condition:
+            lambda: return !wifi::global_wifi_component->is_connected() || id(ble_provisioning_active);
+          then:
+            - lambda: |-
+                id(myDisplay).show_page(wifiWaitingP);
+                id(myDisplay).update();
+                id(lightTO) = 0;
+            - light.turn_on: screen_backlight
+            - delay: 1s
+      - logger.log: WiFi connected, moving to waiting state
+      - lambda: id(phase) = 1;
+      - script.execute: reset_display
   - id: update_playback_mode
     mode: restart
     then:
       - if:
           condition:
-            lambda: 'return id(music_active);'
+            lambda: |-
+              return id(music_active) ||
+                  id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING;
           then:
             - script.stop: enter_idle_mode
-            # Do not queue a voice-player volume command here: it can arrive
-            # after MA's volume and overwrite the shared physical output.
-            - lambda: |-
-                id(mute) = false;
-                id(auto_mute_active) = false;
-            # Both the Assist and MA mixer inputs set volume on the same
-            # physical speaker. Restore MA's level after the Assist path.
-            - speaker.volume_set:
-                id: radio_speaker
-                volume: !lambda |-
-                  const float volume = id(sendspin_media_player).volume;
-                  return std::isfinite(volume) ? clamp(volume, 0.0f, 1.0f) : 1.0f;
-            # Local voice volume below 10% also attenuates the shared ES8388
-            # output registers; MA always needs their normal full-scale value.
-            - lambda: |-
-                for (uint8_t reg = 0x2E; reg <= 0x31; reg++) {
-                  id(my_es8388).write_byte(reg, 0x21);
-                }
-            - micro_wake_word.stop:
             - if:
                 condition:
-                  lambda: 'return !id(assist_return_to_ma);'
+                  lambda: return !id(assist_return_to_ma);
                 then:
-                  - lambda: 'id(phase) = 5;'
+                  - lambda: id(phase) = 5;
+                  - script.execute: aec_sync_output
+                  - script.execute: aec_rearm_wake_word
                   - script.execute: reset_display
           else:
             - script.execute: enter_idle_mode
-
   - id: enter_idle_mode
     mode: restart
     then:
-      # A station change briefly stops the local source while MA remains
-      # PLAYING. Do not open the microphone during that transition.
       - delay: 1200ms
-      - wait_until:
-          condition:
-            lambda: 'return id(radio_speaker).is_stopped();'
-          timeout: 4s
       - if:
           condition:
-            lambda: |-
-              return !id(music_active) && !id(assist_return_to_ma) &&
-                  id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING &&
-                  id(radio_speaker).is_stopped();
+            and:
+              - lambda: |-
+                  return !id(music_active) && !id(assist_return_to_ma) &&
+                      !id(va).is_running() &&
+                      id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING;
+              - not:
+                  media_player.is_announcing: speaker_media_player
           then:
-            - lambda: 'id(phase) = 1;'
+            - lambda: id(phase) = 1;
             - script.execute: reset_display
-
   - id: waiting
     mode: restart
     then:
-               - if:
-                   condition:
-                         voice_assistant.is_running:
-                   then:
-                      - delay: 1s
-                      - voice_assistant.stop:
-               - script.execute: mute_on
-               - logger.log: "===> wakeword"
-               - lambda: |-
-                   id(myDisplay).show_page(waitingP);
-                   id(myDisplay).update();
-                   id(lightTO) = 0;
-               - light.turn_on: screen_backlight
-               # The Assist announcement can report IDLE before the shared
-               # I2S speaker has finished draining. Retry wake-word startup
-               # only after that output is actually released.
-               - wait_until:
-                   condition:
-                     lambda: |-
-                       return id(radio_speaker).is_stopped() || id(music_active) ||
-                           id(assist_return_to_ma) || id(va).is_running();
-                   timeout: 8s
-               - if:
-                   condition:
-                     and:
-                       - lambda: |-
-                           return !id(music_active) && !id(mic_muted) &&
-                               !id(assist_return_to_ma) && !id(va).is_running() &&
-                               id(sendspin_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING &&
-                               id(radio_speaker).is_stopped();
-                       - not:
-                           micro_wake_word.is_running:
-                   then:
-                     - micro_wake_word.start:
-
-
+      - script.execute: mute_on
+      - script.execute: aec_rearm_wake_word
+      - logger.log: ===> wakeword (duplex)
+      - lambda: |-
+          id(myDisplay).show_page(waitingP);
+          id(myDisplay).update();
+          id(lightTO) = 0;
+      - light.turn_on: screen_backlight
   - id: listening
     mode: restart
     then:
-       - logger.log: "===> listening"
-       - script.execute: mute_on
-       - lambda: |-
-            id(myDisplay).show_page(listeningP);
-            id(myDisplay).update();
-            id(lightTO) = 0;
-
-       - light.turn_on: screen_backlight
-
-
+      - script.execute: ui_begin_assist_display
+      - logger.log: ===> listening
+      - script.execute: mute_on
+      - lambda: |-
+          id(myDisplay).show_page(listeningP);
+          id(myDisplay).update();
+          id(lightTO) = 0;
+      - light.turn_on: screen_backlight
   - id: answering
     mode: restart
     then:
-       - logger.log: "===> answering"
-       - script.execute: mute_off
-       - lambda: |-
-            id(myDisplay).show_page(answeringP);
-            id(myDisplay).update();
-            id(lightTO) = 0;
-       - light.turn_on: screen_backlight
-       - delay: 10s
-
-
-
-
+      - logger.log: ===> answering
+      - script.execute: mute_off
+      - lambda: |-
+          id(myDisplay).show_page(answeringP);
+          id(myDisplay).update();
+          id(lightTO) = 0;
+      - light.turn_on: screen_backlight
+      - delay: 10s
   - id: external_player
     mode: restart
     then:
-       - logger.log: "===> front end player"
-#       - script.execute: mute_off
-       - lambda: |-
-            id(myDisplay).show_page(waitingBP);
-            id(myDisplay).update();
-            id(lightTO) = 0;
-       - light.turn_on: screen_backlight
-
+      - logger.log: ===> front end player
+      - lambda: |-
+          id(myDisplay).show_page(waitingBP);
+          id(myDisplay).update();
+          id(lightTO) = 0;
+      - light.turn_on: screen_backlight
   - id: mute_on
     then:
-      - if:
-          condition:
-            lambda: 'return !id(auto_mute_active);'
-          then:
-            - media_player.volume_set:
-                id: speaker_media_player
-                volume: '0'
       - lambda: |-
+          id(radio_speaker).set_mute_state(true);
           id(mute) = true;
           id(auto_mute_active) = true;
           id(volume_display_active) = true;
           id(volume_display_timer) = 0;
       - script.execute: schedule_volume_update
-
-  - id: mute_off
-    then:
       - if:
           condition:
-            lambda: 'return id(auto_mute_active);'
+            lambda: return id(ui_cue_kind) != 0;
           then:
-            - script.execute: apply_local_codec_volume
-            - media_player.volume_set:
-                id: speaker_media_player
-                volume: !lambda return(id(Vol));
+            - script.execute: aec_sync_output
+  - id: mute_off
+    then:
       - lambda: |-
           id(mute) = false;
           id(auto_mute_active) = false;
           id(volume_display_active) = true;
           id(volume_display_timer) = 0;
+      - script.execute: aec_sync_output
       - script.execute: schedule_volume_update
-      
-     
-      
-      
-      
-      
-      
+  - id: aec_tune_wake_word_task
+    then:
+      - lambda: |-
+          // ESPHome 2026.9 creates the inference worker as "mww" at priority 3.
+          // Let it run ahead of the HTTP/UI workloads, but below duplex I2S
+          // (19). Reapply after each start; the component deletes its own task
+          // from the main loop, so do not cache a handle across restarts.
+          if (!id(mww).is_running()) return;
+          const TaskHandle_t task = xTaskGetHandle("mww");
+          if (task == nullptr) return;  // Never change the calling task's priority.
+          if (uxTaskPriorityGet(task) < 6) {
+            vTaskPrioritySet(task, 6);
+            ESP_LOGI("radio_audio", "Wake-word worker priority raised to 6");
+          }
+  - id: aec_sync_output
+    then:
+      - if:
+          condition:
+            lambda: |-
+                return id(ui_cue_kind) != 0 &&
+                    (id(speaker_media_player).is_muted() ||
+                     (id(mute) && !id(auto_mute_active)) ||
+                     (!id(assist_return_to_ma) &&
+                      (id(music_active) ||
+                       id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING)));
+          then:
+            # No recursive aec_sync_output call; restore normal routing below.
+            - script.execute: release_ui_cue
+            - script.execute: aec_rearm_wake_word
+      - if:
+          condition:
+            lambda: return id(ui_cue_kind) != 0;
+          then:
+            - lambda: |-
+                // Temporary hardware level only: no Vol/MA/entity writes.
+                for (uint8_t reg = 0x2E; reg <= 0x31; reg++)
+                  id(my_es8388).write_byte(reg, 0x21);
+                const float level = id(ui_sound_volume).state;
+                id(radio_speaker).set_volume(std::isfinite(level) ? clamp(level / 100.0f, 0.0f, 1.0f) : 0.0f);
+                id(radio_speaker).set_mute_state(false);
+            - script.stop: aec_sync_output
+      - if:
+          condition:
+            and:
+              - lambda: |-
+                  return !id(assist_return_to_ma) &&
+                      (id(music_active) ||
+                       id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING);
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing: speaker_media_player
+          then:
+            - lambda: |-
+                const float volume = id(sendspin_media_player).volume;
+                if (std::isfinite(volume))
+                  id(radio_speaker).set_volume(clamp(volume, 0.0f, 1.0f));
+                // set_volume alone does not clear a previous physical mute.
+                // Use MA's actual mute state, never unmute a user-muted group.
+                id(radio_speaker).set_mute_state(id(sendspin_media_player).is_muted());
+                for (uint8_t reg = 0x2E; reg <= 0x31; reg++)
+                  id(my_es8388).write_byte(reg, 0x21);
+                id(mute) = false;
+                id(auto_mute_active) = false;
+          else:
+            - script.execute: apply_local_codec_volume
+            - lambda: |-
+                id(radio_speaker).set_volume(clamp(id(Vol), 0.0f, 1.0f));
+                id(radio_speaker).set_mute_state(
+                    id(auto_mute_active) || id(speaker_media_player).is_muted());
+  - id: apply_radio_microphone_input
+    parameters:
+      input: string
+    then:
+      - lambda: |-
+          // ES8388 datasheet rev. 5, ADC Control 2/3:
+          // DSSEL=1, DSL=0. DSR selects input pair 1/2 for the right ADC.
+          // MONOMIX[4:3]=10 mixes both PGAs into the right ADC, retaining
+          // the existing mono/right I2S path and single-channel AEC.
+          const uint8_t inputs = input == "Left" ? 0xF8 : 0xFC;
+          const uint8_t mix = input == "Both" ? 0x12 : 0x02;
+          bool ok = id(my_es8388).write_byte(0x0A, inputs);
+          ok &= id(my_es8388).write_byte(0x0B, mix);
+          uint8_t actual_inputs = 0, actual_mix = 0;
+          ok &= id(my_es8388).read_byte(0x0A, &actual_inputs);
+          ok &= id(my_es8388).read_byte(0x0B, &actual_mix);
+          if (!ok || actual_inputs != inputs || actual_mix != mix) {
+            ESP_LOGE("radio_codec", "Microphone routing was not confirmed");
+          } else {
+            ESP_LOGI("radio_codec", "Microphone input: %s (ADC2=0x%02X ADC3=0x%02X)",
+                     input.c_str(), actual_inputs, actual_mix);
+          }
+  - id: apply_radio_codec_routing
+    then:
+      - script.execute:
+          id: apply_radio_microphone_input
+          input: !lambda return id(microphone_input).current_option().str();
+      - lambda: |-
+          bool ok = true;
+          ok &= id(my_es8388).write_byte(0x0E, 0x30);  // ADC high-pass filter
+          ok &= id(my_es8388).write_byte(0x16, 0x03);  // ADC noise gate
+          if (!ok) ESP_LOGE("radio_codec", "Failed to apply Radio microphone routing");
+      - if:
+          condition:
+            binary_sensor.is_on: jack_detect
+          then:
+            - script.execute: jack_detect_high
+          else:
+            - script.execute: jack_detect_low
+      - if:
+          condition:
+            lambda: |-
+              return !id(assist_return_to_ma) &&
+                  (id(music_active) ||
+                   id(sendspin_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING);
+          then:
+            - lambda: |-
+                for (uint8_t reg = 0x2E; reg <= 0x31; reg++)
+                  id(my_es8388).write_byte(reg, 0x21);
+          else:
+            - script.execute: apply_local_codec_volume
+      - logger.log:
+          level: INFO
+          format: Radio codec routing reapplied after duplex codec open
+  - id: aec_rearm_wake_word
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: return !id(ble_provisioning_active) && !id(mic_muted) && !id(assist_return_to_ma) && id(ui_cue_kind) == 0;
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing: speaker_media_player
+              - not:
+                  micro_wake_word.is_running:
+          then:
+            - micro_wake_word.start:
+
+esp_aec:
+  id: aec
+  sample_rate: 16000
+  mode: sr_low_cost
+  filter_length: 4
+
+# Duplex I2S and codec configuration validated on the Radio.
+
+esp_audio_stack:
+  id: audio_stack
+  sample_rate: 48000
+  output_sample_rate: 16000
+  bits_per_sample: 16
+  slot_bit_width: 16
+  num_channels: 2
+  speaker_channels: 2
+  rx_slot_mode: mono
+  mic_channel: right
+  processor_id: aec
+  aec_reference: ring_buffer
+  aec_reference_buffer_ms: 80
+  task_core: 1
+  i2s_mclk_pin: GPIO0
+  i2s_bclk_pin: GPIO5
+  i2s_lrclk_pin: GPIO16
+  i2s_din_pin: GPIO4
+  i2s_dout_pin: GPIO17
+  on_start:
+    - script.execute: apply_radio_codec_routing
+  codec:
+    i2c_id: codec_bus
+    input:
+      type: es8388
+      address: 16
+      gain_db: 18.0
+    output:
+      type: es8388
+      address: 16
+
+button:
+  - platform: template
+    name: Audio Diagnostics
+    entity_category: diagnostic
+    on_press:
+      - esp_audio_stack.dump_diagnostics:
+          id: audio_stack
+      - lambda: |-
+          ESP_LOGI("radio_audio",
+                   "Output volume=%.3f mute=%s; MA volume=%.3f mute=%s; voice volume=%.3f mute=%s; auto_mute=%s",
+                   id(radio_speaker).get_volume(), id(radio_speaker).get_mute_state() ? "YES" : "NO",
+                   id(sendspin_media_player).volume, id(sendspin_media_player).is_muted() ? "YES" : "NO",
+                   id(Vol), id(speaker_media_player).is_muted() ? "YES" : "NO",
+                   id(auto_mute_active) ? "YES" : "NO");
+          ESP_LOGI("radio_ble", "Setup=%s BLE=%s internal free=%u largest=%u",
+                   id(ble_provisioning_active) ? "YES" : "NO", id(radio_ble).is_active() ? "ON" : "OFF",
+                   unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                   unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+          nvs_stats_t stats{};
+          if (nvs_get_stats("nvs", &stats) == ESP_OK)
+            ESP_LOGI("radio_ble", "NVS entries: used=%u free=%u total=%u",
+                     unsigned(stats.used_entries), unsigned(stats.free_entries), unsigned(stats.total_entries));
+          // Task name/lifetime are verified against ESPHome 2026.9's MWW.
+          // Handles are looked up only in the main loop, never retained.
+          if (id(mww).is_running()) {
+            const TaskHandle_t task = xTaskGetHandle("mww");
+            if (task != nullptr)
+              ESP_LOGI("radio_audio", "MWW priority=%u core_affinity=%d free_stack=%u",
+                       unsigned(uxTaskPriorityGet(task)), int(xTaskGetCoreID(task)),
+                       unsigned(uxTaskGetStackHighWaterMark(task)));
+          }
+  - platform: template
+    name: Local Audio Test
+    entity_category: diagnostic
+    on_press:
+      - media_player.speaker.play_on_device_media_file:
+          id: speaker_media_player
+          media_file: little_sound
+          announcement: true
+
+debug:
+  update_interval: 30s
+
+

@@ -1,11 +1,11 @@
 {
   "name": "raspiaudio.radio",
-  "version": "2026.9.6",
+  "version": "2026.9.7",
   "builds": [
     {
       "chipFamily": "ESP32-S3",
       "ota": {
-         "md5": "2a97e7be3c54f9df833388f62914f572",  
+         "md5": "e840ac2a067a5402caaafe03928534d3" ,  
          "path": "https://raw.githubusercontent.com/RASPIAUDIO/esphomeRadio/main/update_firmware.bin",
          "offset": 0,
          "summary": "Latest firmware: stable with new features (AEC, improv BLE...)"

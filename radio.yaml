@@ -1,6 +1,7 @@
-# Raspiaudio Radio Full AEC + Improv BLE — light UI + sound cues candidate.
-# Standalone copy of UI2: user-selected startup and listening recordings.
-# The validated radio_full_aec_ble_ui.yaml remains unchanged.
+# Raspiaudio Radio Full AEC + Improv BLE — light UI + sound cues.
+# Release 2026.9.7: HTTPS and non-DMA audio buffers use PSRAM to keep
+# enough internal memory for firmware update checks during music playback.
+# Standalone firmware with user-selected startup and listening recordings.
 # Pastel backgrounds, shared event-driven renderer, 16px multi-line voice answers.
 # Only the original Raspiaudio logo bitmap is needed from images/.
 # Based on AEC4 with Left/Right/Both microphone selection.
@@ -15,13 +16,11 @@
 # Returning those devices to the default layout requires a planned USB migration;
 # back up settings first, as the NVS location changes.
 
-# Device identity: kept unchanged for the commissioned AEC Radio.
+# Keep the existing device identity across firmware updates.
 
 substitutions:
   name: raspiaudio-radio
   friendly_name: Raspiaudio Radio
-
-# Separate build directory; the accepted AEC-only configuration is unchanged.
 
 esphome:
   name: ${name}
@@ -30,7 +29,7 @@ esphome:
   name_add_mac_suffix: false
   project:
     name: raspiaudio.radio
-    version: 2026.9.6
+    version: 2026.9.7
   on_boot:
     - priority: 800
       then:
@@ -100,6 +99,10 @@ esp32:
       # IDF 5.5.5 supports this on S3, but ESPHome 2026.9.0 only sets it on ESP32.
       # use_psram alone otherwise leaves the Bluedroid host in internal RAM.
       CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: y
+      # HTTPS previously failed with MBEDTLS_ERR_SSL_ALLOC_FAILED (-0x7F00).
+      # Use the available external RAM without disabling TLS verification.
+      CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC: n
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: y
 
 preferences:
   flash_write_interval: 5s
@@ -132,6 +135,8 @@ wifi:
     password: '12345678'
     
 http_request:
+  verify_ssl: true
+  timeout: 15s
 
 ota:
   - platform: esphome
@@ -142,7 +147,12 @@ update:
   - platform: http_request
     id: update_http_request
     name: Firmware
-    source: https://raw.githubusercontent.com/RASPIAUDIO/esphomeRadio/main/manifest_update.json   
+    source: https://raw.githubusercontent.com/RASPIAUDIO/esphomeRadio/main/manifest_update.json
+    update_interval: 6h
+    on_update_available:
+      - lambda: |-
+          ESP_LOGI("radio_update", "Update available: %s -> %s (no automatic installation)",
+                   x.current_version.c_str(), x.latest_version.c_str());
     
 captive_portal:
 
@@ -2847,6 +2857,10 @@ esp_audio_stack:
   aec_reference: ring_buffer
   aec_reference_buffer_ms: 80
   task_core: 1
+  # Move only the non-DMA processing buffers to PSRAM (~15 KiB internal RAM saved).
+  # Keep I2S DMA, the audio task stack and wake-word stack in their original memory.
+  # This leaves more internal RAM for ESPHome's 8192-byte update-check task.
+  buffers_in_psram: true
   i2s_mclk_pin: GPIO0
   i2s_bclk_pin: GPIO5
   i2s_lrclk_pin: GPIO16
@@ -2865,6 +2879,16 @@ esp_audio_stack:
       address: 16
 
 button:
+  - platform: template
+    name: Check firmware update
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          ESP_LOGI("radio_update", "Check only: internal free=%u largest=%u; PSRAM free=%u",
+                   unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                   unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                   unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+      - component.update: update_http_request
   - platform: template
     name: Audio Diagnostics
     entity_category: diagnostic
